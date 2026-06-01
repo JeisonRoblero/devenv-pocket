@@ -2,7 +2,7 @@
 
 <!-- markdownlint-disable MD033 -->
 <div align="center">
-  <img width="auto" height="400" alt="devenv-pocket Banner" src="assets/banner.png" />
+  <img width="auto" height="400" alt="devenv-pocket Banner" src="https://github.com/user-attachments/assets/b691eb28-c1e4-4eb7-a8eb-3763fa4f64b2" />
   &nbsp;
 </div>
 <!-- markdownlint-enable MD033 -->
@@ -37,7 +37,7 @@ Run React/Vite web services, Flutter/Android compilations, and PostgreSQL databa
 
 <!-- markdownlint-disable MD033 -->
 <p align="center">
-  <img src="assets/modes.png" width="98%" alt="devenv-pocket Execution Modes" />
+  <img src="https://github.com/user-attachments/assets/5599e3c8-b2b4-4ccc-b650-52e3270a018c" width="98%" alt="devenv-pocket Execution Modes" />
 </p>
 <!-- markdownlint-enable MD033 -->
 
