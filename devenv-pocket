@@ -1,0 +1,1550 @@
+#!/bin/bash
+# ==============================================================================
+# devenv-pocket
+# 
+# A developer environment installer for proot-distro environments (e.g. Ubuntu on Termux)
+# Optimized for ARM64 processors. Supports interactive wizard and CLI arguments.
+# ==============================================================================
+
+# Exit on immediate keyboard interrupt
+trap 'echo -e "\n\e[31m[!] Script interrupted by user. Exiting...\e[0m"; exit 1' INT
+
+# Global configurations
+TOOLS_DIR="$HOME/tools"
+PROJECTS_DIR="$HOME/projects"
+TEMPLATES_DIR="$PROJECTS_DIR/templates"
+DEVENVS_LOG="/tmp/devenv_pocket_install.log"
+
+# Define Theme Colors (ANSI escape sequences)
+CLR_TITLE="\e[1;36m"   # Bold Cyan
+CLR_MENU="\e[36m"    # Cyan
+CLR_TEXT="\e[37m"    # White
+CLR_VAL="\e[32m"     # Green
+CLR_ERR="\e[1;31m"   # Bold Red
+CLR_WARN="\e[1;33m"  # Bold Yellow
+CLR_INFO="\e[34m"    # Blue
+CLR_RESET="\e[0m"     # Reset
+
+# Global CLI modes overrides (set by parameters)
+CLI_MODE=""
+CLI_EDITOR=""
+CLI_OFFLINE=""
+
+# Determine privilege wrapper (sudo or direct root)
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+    if command -v sudo >/dev/null 2>&1; then
+        SUDO="sudo"
+    else
+        echo -e "${CLR_ERR}[✘] Error: You are not running as root and 'sudo' is not installed.${CLR_RESET}"
+        echo -e "Please run this script inside your proot-distro as root, or install 'sudo' first."
+        exit 1
+    fi
+fi
+
+# Print beautiful centered banners
+draw_line() {
+    local char="${1:-─}"
+    local width=70
+    printf "${CLR_MENU}"
+    for ((i=0; i<width; i++)); do printf "%s" "$char"; done
+    printf "${CLR_RESET}\n"
+}
+
+print_header() {
+    clear
+    draw_line "═"
+    echo -e "   ${CLR_TITLE}___                               ____             _        ${CLR_RESET}"
+    echo -e "  ${CLR_TITLE}/ _ \\\___ _  _____ _ __  __  __    /  _ \\ ___  ____ | | _ ___ ${CLR_RESET}"
+    echo -e " ${CLR_TITLE}/ // / -_) |/ / -_) '  \\ \\ \\/ /   /  __ // _ \\/ __/ | |/ / -_)${CLR_RESET}"
+    echo -e "${CLR_TITLE}/____/\\__/\\___/\\__/_/_/_/  \\_/    /_/    \\___/\\__/_  |___/\\__/ ${CLR_RESET}"
+    echo -e "                                                  ${CLR_TITLE}/_/          ${CLR_RESET}"
+    echo -e "         ${CLR_WARN}★ Rapid ARM64 proot-distro Dev Environment Suite ★${CLR_RESET}"
+    draw_line "═"
+    echo -e "${CLR_INFO}[i] GitHub recommendation: groot-desk for visual display setup:${CLR_RESET}"
+    echo -e "    https://github.com/JeisonRoblero/groot-desk"
+    draw_line "─"
+}
+
+# General interactive spinner for background tasks
+run_with_spinner() {
+    local cmd="$1"
+    local msg="$2"
+    
+    # Empty log file
+    : > "$DEVENVS_LOG"
+    
+    # Run command in background
+    eval "$cmd" > "$DEVENVS_LOG" 2>&1 &
+    local pid=$!
+    local spin='-\|/'
+    local i=0
+    
+    while kill -0 $pid 2>/dev/null; do
+        i=$(( (i+1) % 4 ))
+        printf "\r${CLR_MENU}[%c]${CLR_RESET} %s..." "${spin:$i:1}" "$msg"
+        sleep 0.1
+    done
+    
+    wait $pid
+    local exit_code=$?
+    
+    if [ $exit_code -ne 0 ]; then
+        printf "\r${CLR_ERR}[✘]${CLR_RESET} %s (Failed with code %d)\n" "$msg" "$exit_code"
+        echo -e "${CLR_WARN}--- Installation log error output ---${CLR_RESET}"
+        tail -n 15 "$DEVENVS_LOG"
+        echo -e "${CLR_WARN}-------------------------------------${CLR_RESET}"
+        return $exit_code
+    else
+        printf "\r${CLR_VAL}[✔]${CLR_RESET} %s (Completed successfully)\n" "$msg"
+        return 0
+    fi
+}
+
+# Download helper with native wget progress bar
+download_file() {
+    local url="$1"
+    local dest="$2"
+    local name="$3"
+    
+    echo -e "${CLR_INFO}[➔]${CLR_RESET} Downloading $name..."
+    echo -e "    Source: $url"
+    echo -e "    Destination: $dest"
+    
+    # Ensure folder containing destination exists
+    mkdir -p "$(dirname "$dest")"
+    
+    # Download using wget with a progress bar
+    wget -O "$dest" --show-progress "$url"
+    local exit_code=$?
+    
+    if [ $exit_code -ne 0 ]; then
+        echo -e "${CLR_ERR}[✘] Error downloading $name (exit code: $exit_code)${CLR_RESET}"
+        return $exit_code
+    fi
+    echo -e "${CLR_VAL}[✔] Downloaded $name.${CLR_RESET}"
+    return 0
+}
+
+# Helpers to manage blocks in ~/.bashrc safely and cleanly
+append_block_to_bashrc() {
+    local marker="$1"
+    local block="$2"
+    local bashrc="$HOME/.bashrc"
+    
+    touch "$bashrc"
+    if grep -qF "# === START DEVENV-POCKET $marker ===" "$bashrc" 2>/dev/null; then
+        return 1 # already exists
+    fi
+    
+    echo -e "\n# === START DEVENV-POCKET $marker ===\n$block\n# === END DEVENV-POCKET $marker ===" >> "$bashrc"
+    return 0
+}
+
+remove_block_from_bashrc() {
+    local marker="$1"
+    local bashrc="$HOME/.bashrc"
+    
+    if [ -f "$bashrc" ] && grep -qF "# === START DEVENV-POCKET $marker ===" "$bashrc" 2>/dev/null; then
+        # Delete lines between markers inclusive
+        sed -i "/# === START DEVENV-POCKET $marker ===/,/# === END DEVENV-POCKET $marker ===/d" "$bashrc"
+        return 0
+    fi
+    return 1
+}
+
+# Detect specific package installation
+check_apt_pkg() {
+    dpkg -s "$1" >/dev/null 2>&1
+    return $?
+}
+
+# System diagnostics information
+get_free_space() {
+    df -h "$HOME" | awk 'NR==2 {print $4}'
+}
+
+get_system_info() {
+    local arch; arch=$(uname -m)
+    local distro; distro="Unknown Linux"
+    if [ -f /etc/os-release ]; then
+        distro=$(grep '^PRETTY_NAME=' /etc/os-release | cut -d= -f2 | tr -d '"')
+    fi
+    local user; user=$(whoami)
+    local space; space=$(get_free_space)
+    
+    echo -e "┌──────────────────────────────────────────────────────────────────────┐"
+    echo -e "│ ${CLR_TITLE}SYSTEM DETAILS${CLR_RESET}                                                       │"
+    echo -e "├──────────────────────────────────────────────────────────────────────┤"
+    printf "│ %-14s : %-51s │\n" "Distribution" "$distro"
+    printf "│ %-14s : %-51s │\n" "Architecture" "$arch"
+    printf "│ %-14s : %-51s │\n" "Active User" "$user"
+    printf "│ %-14s : %-51s │\n" "Disk Available" "$space"
+    echo -e "└──────────────────────────────────────────────────────────────────────┘"
+}
+
+# ==============================================================================
+# SELECTION WIZARD HELPERS (GRAPHICAL VS TERMINAL / EDITORS)
+# ==============================================================================
+
+select_execution_mode() {
+    if [ -n "$CLI_MODE" ]; then
+        echo "$CLI_MODE"
+        return 0
+    fi
+    
+    echo -e "\n${CLR_MENU}┌──────────────────────────────────────────────────────────────────────┐${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET} ${CLR_TITLE}CHOOSE EXECUTION ENVIRONMENT MODE${CLR_RESET}                                   ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}├──────────────────────────────────────────────────────────────────────┤${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET} [1] Graphical Desktop Mode                                            ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET}     - Designed for running graphical shells inside proot-distro      ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET}     - Configures real Chromium and desktop web layout scripts         ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET}     - Recommends using 'groot-desk' setup outside in Termux           ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET}                                                                      ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET} [2] Terminal / Headless Mode                                          ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET}     - Designed for pure CLI terminal developer workflows              ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET}     - Bypasses unnecessary GUI drivers and heavy PPA dependencies    ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET}     - Exposes web-based VS Code and background local FTP editors      ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}└──────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+    echo -ne " ${CLR_MENU}Choose environment setup type (1-2, default is Terminal):${CLR_RESET} "
+    read -r m_choice
+    
+    if [ "$m_choice" = "1" ]; then
+        echo "graphical"
+    else
+        echo "terminal"
+    fi
+}
+
+select_terminal_editor() {
+    if [ -n "$CLI_EDITOR" ]; then
+        echo "$CLI_EDITOR"
+        return 0
+    fi
+    
+    echo -e "\n${CLR_MENU}┌──────────────────────────────────────────────────────────────────────┐${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET} ${CLR_TITLE}CHOOSE DEVELOPER EDITOR ACCESSIBILITIES (HEADLESS)${CLR_RESET}                  ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}├──────────────────────────────────────────────────────────────────────┤${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET} [1] code-server (Full VS Code running in Android's web browser)       ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET}     - Recommended. Starts a VS Code instance accessed from browser.   ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET}     - Installs 'cs' shell command to launch VS Code seamlessly.       ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET}                                                                      ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET} [2] Acode via FTP Server (pyftpdlib Python library package)           ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET}     - Exposes the internal /root/projects directory safely.           ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET}     - Allows lightning-fast offline code edits within Android Acode.  ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET}                                                                      ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET} [3] Install BOTH code-server and Acode FTP Server                     ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET} [4] None (I will use terminal nano/vim or mount paths manually)       ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}└──────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+    echo -ne " ${CLR_MENU}Select coding interface helper (1-4, default is Both):${CLR_RESET} "
+    read -r e_choice
+    
+    if [ "$e_choice" = "1" ]; then
+        echo "codeserver"
+    elif [ "$e_choice" = "2" ]; then
+        echo "ftp"
+    elif [ "$e_choice" = "4" ]; then
+        echo "none"
+    else
+        echo "both"
+    fi
+}
+
+show_acode_direct_path_tip() {
+    echo -e "\n${CLR_INFO}💡 TIP: Direct offline editor access to Acode (Alternative Option A)${CLR_RESET}"
+    echo -e "   If you prefer not to run background servers, you can access proot paths directly:"
+    echo -e "   1. Enable 'Allow management of all files' in Acode Android system settings."
+    echo -e "   2. In Acode, tap Open Folder -> Root (/) -> Navigate manually to:"
+    echo -e "      ${CLR_MENU}/data/data/com.termux/files/var/lib/proot-distro/installed-rootfs/ubuntu/root/projects${CLR_RESET}"
+}
+
+# ==============================================================================
+# ENVIRONMENT 1: NODE.JS & WEB DEVELOPMENT
+# ==============================================================================
+
+check_node_web_status() {
+    local missing_base=0
+    local base_pkgs=(curl git unzip xz-utils zip wget nodejs npm)
+    for pkg in "${base_pkgs[@]}"; do
+        if ! check_apt_pkg "$pkg"; then
+            ((missing_base++))
+        fi
+    done
+    
+    local has_pnpm=0
+    if command -v pnpm >/dev/null 2>&1; then
+        has_pnpm=1
+    fi
+    
+    if [ $missing_base -eq 0 ] && [ $has_pnpm -eq 1 ]; then
+        echo -e "${CLR_VAL}[Installed]${CLR_RESET}"
+    elif [ $missing_base -ne 0 ] && [ $has_pnpm -eq 0 ]; then
+        echo -e "${CLR_ERR}[Not Installed]${CLR_RESET}"
+    else
+        echo -e "${CLR_WARN}[Partially Installed]${CLR_RESET}"
+    fi
+}
+
+configure_offline_web_templates() {
+    echo -e "\n${CLR_TITLE}Setting up Offline Web Caching & Templates...${CLR_RESET}"
+    mkdir -p "$TEMPLATES_DIR"
+    
+    # 1. React Vite TS Template
+    local r_dir="$TEMPLATES_DIR/react-vite-ts"
+    if [ ! -d "$r_dir" ]; then
+        echo -e "  Creating React + Vite + TypeScript Template..."
+        mkdir -p "$r_dir/src"
+        
+        # package.json
+        cat > "$r_dir/package.json" << 'EOF'
+{
+  "name": "react-vite-ts-template",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "typescript": "^5.2.2",
+    "vite": "^5.3.1"
+  }
+}
+EOF
+
+        # tsconfig.json
+        cat > "$r_dir/tsconfig.json" << 'EOF'
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["DOM", "DOM.Iterable", "ScriptHost", "ES2020"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src"]
+}
+EOF
+
+        # vite.config.ts
+        cat > "$r_dir/vite.config.ts" << 'EOF'
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+export default defineConfig({
+  plugins: [react()],
+});
+EOF
+
+        # index.html
+        cat > "$r_dir/index.html" << 'EOF'
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>React + Vite + TS Template</title>
+  </head>
+  <body style="margin:0; font-family:sans-serif; background-color:#121212; color:#ffffff;">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+EOF
+
+        # src/main.tsx
+        cat > "$r_dir/src/main.tsx" << 'EOF'
+import React from 'react'
+import ReactDOM from 'react-dom/client'
+import App from './App.tsx'
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+)
+EOF
+
+        # src/App.tsx
+        cat > "$r_dir/src/App.tsx" << 'EOF'
+import React, { useState } from 'react';
+export default function App() {
+  const [count, setCount] = useState(0);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh' }}>
+      <h1 style={{ color: '#00ffff' }}>React + Vite + TypeScript Offline Template</h1>
+      <p>Hardlinked locally via pnpm to save storage.</p>
+      <button 
+        style={{ padding: '10px 20px', fontSize: '16px', cursor: 'pointer', backgroundColor: '#00ffff', border: 'none', borderRadius: '5px', color: '#000000', fontWeight: 'bold' }}
+        onClick={() => setCount(count + 1)}
+      >
+        Count is: {count}
+      </button>
+    </div>
+  );
+}
+EOF
+        
+        # Populate store
+        run_with_spinner "cd '$r_dir' && pnpm install" "Populating pnpm react-vite-ts dependencies store"
+    else
+        echo -e "${CLR_VAL}[✔]${CLR_RESET} react-vite-ts template already configured."
+    fi
+
+    # 2. Node Postgres Template
+    local n_dir="$TEMPLATES_DIR/node-postgres"
+    if [ ! -d "$n_dir" ]; then
+        echo -e "  Creating Node + PostgreSQL Starter Template..."
+        mkdir -p "$n_dir"
+        
+        # package.json
+        cat > "$n_dir/package.json" << 'EOF'
+{
+  "name": "node-postgres-template",
+  "version": "1.0.0",
+  "description": "Offline Node + Postgres + Drizzle starter template",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "pg": "^8.12.0",
+    "drizzle-orm": "^0.31.2"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.22.7"
+  }
+}
+EOF
+
+        # index.js
+        cat > "$n_dir/index.js" << 'EOF'
+const express = require('express');
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.use(express.json());
+
+app.get('/', (req, res) => {
+  res.json({ message: "Node.js + PostgreSQL Offline Service is Active!" });
+});
+
+app.listen(port, () => {
+  console.log(`Server running at http://localhost:${port}`);
+});
+EOF
+
+        # Populate store
+        run_with_spinner "cd '$n_dir' && pnpm install" "Populating pnpm node-postgres dependencies store"
+    else
+        echo -e "${CLR_VAL}[✔]${CLR_RESET} node-postgres template already configured."
+    fi
+}
+
+install_node_web_env() {
+    local mode
+    mode=$(select_execution_mode)
+    
+    echo -e "\n${CLR_TITLE}Installing Node.js & Web Development Profile (${mode} mode)...${CLR_RESET}"
+    
+    if [ "$mode" = "graphical" ]; then
+        echo -e "${CLR_WARN}[!] Storage Note:${CLR_RESET} Requires ~450 MB download / ~1.2 GB disk space."
+    else
+        echo -e "${CLR_WARN}[!] Storage Note:${CLR_RESET} Requires ~150 MB download / ~400 MB disk space."
+    fi
+    
+    # 1. Update Package List & Install Base System Tools
+    echo -e "\n--- Step 1: Upgrading package manager & installing dependencies ---"
+    run_with_spinner "$SUDO apt update" "Syncing repositories"
+    
+    local base_pkgs=(curl git unzip xz-utils zip wget nodejs npm)
+    if [ "$mode" = "graphical" ]; then
+        base_pkgs+=(software-properties-common)
+    fi
+    
+    local install_list=()
+    for pkg in "${base_pkgs[@]}"; do
+        if ! check_apt_pkg "$pkg"; then
+            install_list+=("$pkg")
+        fi
+    done
+    
+    if [ ${#install_list[@]} -gt 0 ]; then
+        run_with_spinner "$SUDO apt install -y ${install_list[*]}" "Installing developer packages (${install_list[*]})"
+    else
+        echo -e "${CLR_VAL}[✔]${CLR_RESET} Base packages already installed."
+    fi
+    
+    # 2. Install pnpm
+    echo -e "\n--- Step 2: Global Node Package Managers ---"
+    if ! command -v pnpm >/dev/null 2>&1; then
+        run_with_spinner "$SUDO npm install -g pnpm" "Installing pnpm globally via npm"
+    else
+        echo -e "${CLR_VAL}[✔]${CLR_RESET} pnpm already globally installed ($(pnpm -v))."
+    fi
+    
+    # 3. Setup Browser graphical support if chosen
+    if [ "$mode" = "graphical" ]; then
+        echo -e "\n--- Step 3: Browser Setup (Chromium ARM64 PPA) ---"
+        if ! check_apt_pkg "chromium"; then
+            run_with_spinner "$SUDO add-apt-repository -y ppa:xtradeb/apps" "Adding xtradeb/apps community PPA"
+            run_with_spinner "$SUDO apt update" "Updating repository list"
+            run_with_spinner "$SUDO apt install -y chromium" "Installing Chromium web browser"
+        else
+            echo -e "${CLR_VAL}[✔]${CLR_RESET} Chromium browser package already installed."
+        fi
+        
+        # Write Chromium pin priorities
+        if [ ! -f "/etc/apt/preferences.d/xtradeb-pin" ]; then
+            echo -e "${CLR_INFO}[➔]${CLR_RESET} Setting up Chromium package priority pinning..."
+            local pin_content="Package: *\nPin: release o=LP-PPA-xtradeb-apps\nPin-Priority: 1\n\nPackage: chromium\nPin: release o=LP-PPA-xtradeb-apps\nPin-Priority: 500\n"
+            echo -e "$pin_content" | $SUDO tee /etc/apt/preferences.d/xtradeb-pin >/dev/null
+        fi
+        
+        # Create Chromium wrapper file for root sandbox restrictions in proot
+        if [ ! -f "/usr/local/bin/chromium-wrapper" ]; then
+            echo -e "${CLR_INFO}[➔]${CLR_RESET} Creating /usr/local/bin/chromium-wrapper..."
+            local wrapper_content="#!/bin/bash\nexec chromium --no-sandbox --disable-dev-shm-usage --no-first-run \"\$@\"\n"
+            echo -e "$wrapper_content" | $SUDO tee /usr/local/bin/chromium-wrapper >/dev/null
+            $SUDO chmod +x /usr/local/bin/chromium-wrapper
+        fi
+        append_block_to_bashrc "CHROMIUM" "export CHROME_EXECUTABLE=/usr/local/bin/chromium-wrapper"
+    fi
+    
+    # 4. Handle Headless Code Editors Setup
+    local editor="none"
+    if [ "$mode" = "terminal" ]; then
+        editor=$(select_terminal_editor)
+    else
+        editor="codeserver"
+    fi
+    
+    if [ "$editor" = "codeserver" ] || [ "$editor" = "both" ]; then
+        echo -e "\n--- Step 4: Installing code-server (VS Code in Android browser) ---"
+        if ! command -v code-server >/dev/null 2>&1; then
+            echo -e "${CLR_INFO}[➔]${CLR_RESET} Fetching and executing code-server official installer script..."
+            curl -fsSL https://code-server.dev/install.sh | $SUDO sh
+        else
+            echo -e "${CLR_VAL}[✔]${CLR_RESET} code-server is already installed."
+        fi
+        
+        # Append VS Code 'cs' helper to ~/.bashrc
+        local cs_func='# cs - start code-server and open the browser automatically
+cs() {
+  local path="${1:-.}"
+  local port=8080
+  while true; do
+    if ! nc -z localhost "$port" > /dev/null 2>&1; then
+      break
+    fi
+    port=$((port + 1))
+  done
+  echo "Port $port is free, starting code-server..."
+  code-server --port "$port" --auth none "$path" &
+  sleep 2
+  local url="http://localhost:$port"
+  echo "Opening: $url"
+  termux-open-url "$url" 2>/dev/null || echo -e "\e[33mPlease open this URL in your Android browser: $url\e[0m"
+}'
+        append_block_to_bashrc "CODESERVER" "$cs_func"
+    fi
+    
+    if [ "$editor" = "ftp" ] || [ "$editor" = "both" ]; then
+        echo -e "\n--- Step 5: Configuring Python FTP Server (for Acode) ---"
+        start_ftp_server
+        
+        echo -ne "\n${CLR_MENU}[?]${CLR_RESET} Run FTP server automatically on terminal session start? (y/N): "
+        read -r run_boot
+        if [[ "$run_boot" =~ ^[Yy]$ ]]; then
+            append_block_to_bashrc "FTPBOOT" "python3 -m pyftpdlib -p 2121 -w -d $PROJECTS_DIR >/tmp/devenv_ftp.log 2>&1 &"
+            echo -e "${CLR_VAL}[✔] Registered automatic FTP server start on session login.${CLR_RESET}"
+        fi
+    fi
+    
+    if [ "$mode" = "terminal" ]; then
+        show_acode_direct_path_tip
+    fi
+    
+    # 5. Offer offline templates caching setup
+    local enable_offline="$CLI_OFFLINE"
+    if [ -z "$enable_offline" ]; then
+        echo -ne "\n${CLR_MENU}[?]${CLR_RESET} Configure Offline Web Caching & Starter Templates? (React/Node) (y/N): "
+        read -r enable_offline
+    fi
+    if [[ "$enable_offline" =~ ^([Yy]|true)$ ]]; then
+        configure_offline_web_templates
+    fi
+    
+    # Project setup defaults
+    mkdir -p "$PROJECTS_DIR"
+    
+    echo -e "\n${CLR_VAL}✔ Node.js & Web development profile setup complete!${CLR_RESET}"
+    echo -e "${CLR_WARN}[!] Action Needed:${CLR_RESET} Please run: ${CLR_MENU}source ~/.bashrc${CLR_RESET} to enable settings."
+}
+
+remove_node_web_env() {
+    echo -e "${CLR_WARN}[!] WARNING: You are about to remove Node.js & Web Development Profile.${CLR_RESET}"
+    echo -e "    This will delete pnpm, Chromium wrappers, code-servers, and FTP aliases."
+    echo -ne "    Do you want to proceed? (y/N): "
+    read -r response
+    if [[ ! "$response" =~ ^[Yy]$ ]]; then
+        echo -e "${CLR_ERR}Removal cancelled.${CLR_RESET}"
+        return 1
+    fi
+    
+    # Remove configs
+    remove_block_from_bashrc "CHROMIUM"
+    remove_block_from_bashrc "CODESERVER"
+    remove_block_from_bashrc "FTPBOOT"
+    stop_ftp_server >/dev/null 2>&1
+    
+    # Delete Chromium wrapper and configurations
+    $SUDO rm -f "/usr/local/bin/chromium-wrapper" 2>/dev/null
+    $SUDO rm -f "/etc/apt/preferences.d/xtradeb-pin" 2>/dev/null
+    
+    # Uninstall packages
+    echo -e "${CLR_INFO}[➔] Purging packages...${CLR_RESET}"
+    run_with_spinner "$SUDO apt purge -y chromium code-server" "Purging Chromium and code-server"
+    run_with_spinner "$SUDO npm uninstall -g pnpm" "Removing pnpm global module"
+    
+    echo -e "${CLR_VAL}[✔] Node.js & Web Development profile successfully removed.${CLR_RESET}"
+}
+
+# ==============================================================================
+# ENVIRONMENT 2: FLUTTER & ANDROID APP SUITE
+# ==============================================================================
+
+check_flutter_android_status() {
+    local missing_base=0
+    local base_pkgs=(openjdk-17-jdk android-tools-adb aapt clang cmake ninja-build lld binutils curl git unzip xz-utils zip wget)
+    for pkg in "${base_pkgs[@]}"; do
+        if ! check_apt_pkg "$pkg"; then
+            ((missing_base++))
+        fi
+    done
+    
+    local has_flutter=0
+    if [ -d "$TOOLS_DIR/flutter" ] && command -v flutter >/dev/null 2>&1; then
+        has_flutter=1
+    fi
+    
+    local has_sdk=0
+    if [ -f "$TOOLS_DIR/android-sdk/cmdline-tools/latest/bin/sdkmanager" ]; then
+        has_sdk=1
+    fi
+    
+    local has_ndk=0
+    if [ -d "$TOOLS_DIR/android-sdk/ndk/28.2.13676358" ]; then
+        has_ndk=1
+    fi
+    
+    if [ $missing_base -eq 0 ] && [ $has_flutter -eq 1 ] && [ $has_sdk -eq 1 ] && [ $has_ndk -eq 1 ]; then
+        echo -e "${CLR_VAL}[Fully Installed]${CLR_RESET}"
+    elif [ $missing_base -eq ${#base_pkgs[@]} ] && [ $has_flutter -eq 0 ] && [ $has_sdk -eq 0 ] && [ $has_ndk -eq 0 ]; then
+        echo -e "${CLR_ERR}[Not Installed]${CLR_RESET}"
+    else
+        echo -e "${CLR_WARN}[Partially Installed]${CLR_RESET}"
+    fi
+}
+
+configure_offline_flutter_templates() {
+    echo -e "\n${CLR_TITLE}Setting up Offline Flutter & Android Caches...${CLR_RESET}"
+    echo -e "This involves initializing a template and running a full test compile."
+    echo -e "${CLR_WARN}[!] Storage Note:${CLR_RESET} Requires downloading and caching ~700 MB of dependencies."
+    echo -e "This can take up to 3-5 minutes depending on your internet connection speed."
+    
+    mkdir -p "$TEMPLATES_DIR"
+    local f_dir="$TEMPLATES_DIR/flutter-starter"
+    
+    if [ ! -d "$f_dir" ]; then
+        # Create Starter
+        run_with_spinner "cd '$TEMPLATES_DIR' && flutter create flutter-starter --org com.devenv.offline" "Creating Flutter starter template"
+        
+        # Patch API overrides
+        sed -i 's/compileSdk = flutter.compileSdkVersion/compileSdk = 34/' "$f_dir/android/app/build.gradle.kts"
+        sed -i 's/targetSdk = flutter.targetSdkVersion/targetSdk = 34/' "$f_dir/android/app/build.gradle.kts"
+        echo -e "  Applied compileSdk=34 & targetSdk=34 overrides to build.gradle."
+        
+        # Populate pub cache
+        run_with_spinner "cd '$f_dir' && flutter pub get" "Caching Dart/Flutter library dependencies"
+        
+        # Pre-build to populate Gradle maven caches
+        echo -e "  Running dry-run debug compilation (populates Gradle wrapper and maven libraries)..."
+        run_with_spinner "cd '$f_dir' && flutter build apk --debug" "Compiling template (populating maven cache)"
+    else
+        echo -e "${CLR_VAL}[✔]${CLR_RESET} flutter-starter template already configured."
+    fi
+}
+
+install_flutter_android_env() {
+    local mode
+    mode=$(select_execution_mode)
+    
+    echo -e "\n${CLR_TITLE}Installing Flutter & Android Development Profile (${mode} mode)...${CLR_RESET}"
+    echo -e "${CLR_WARN}[!] Storage Note:${CLR_RESET} Requires ~1.5 GB download / ~5.5 GB disk space."
+    echo -e "${CLR_WARN}[!] Installing in:${CLR_RESET} $TOOLS_DIR (SDKs & tools)"
+    echo -e "${CLR_WARN}[!] Warnings:${CLR_RESET} A custom ARM64 build of NDK r28c will be downloaded (~171 MB)."
+    
+    # Ensure tools directory exists
+    mkdir -p "$TOOLS_DIR"
+    
+    # 1. Update Package List & Install Base System Tools
+    echo -e "\n--- Step 1: Upgrading package manager & installing dependencies ---"
+    run_with_spinner "$SUDO apt update" "Syncing repositories"
+    
+    local base_pkgs=(openjdk-17-jdk android-tools-adb aapt clang cmake ninja-build lld binutils curl git unzip xz-utils zip wget)
+    if [ "$mode" = "graphical" ]; then
+        base_pkgs+=(software-properties-common)
+    fi
+    
+    local install_list=()
+    for pkg in "${base_pkgs[@]}"; do
+        if ! check_apt_pkg "$pkg"; then
+            install_list+=("$pkg")
+        fi
+    done
+    
+    if [ ${#install_list[@]} -gt 0 ]; then
+        run_with_spinner "$SUDO apt install -y ${install_list[*]}" "Installing developer packages (${install_list[*]})"
+    else
+        echo -e "${CLR_VAL}[✔]${CLR_RESET} Base packages already installed."
+    fi
+    
+    # Setup Dockerenv to suppress Flutter root warnings inside proot container
+    $SUDO touch /.dockerenv 2>/dev/null
+    
+    # 2. Setup Chromium (PPA) for Flutter Web output (only if graphical mode is chosen)
+    if [ "$mode" = "graphical" ]; then
+        echo -e "\n--- Step 2: Web platform target setup (Chromium PPA) ---"
+        if ! check_apt_pkg "chromium"; then
+            run_with_spinner "$SUDO add-apt-repository -y ppa:xtradeb/apps" "Adding PPA"
+            run_with_spinner "$SUDO apt update" "Updating packages"
+            run_with_spinner "$SUDO apt install -y chromium" "Installing Chromium"
+        fi
+        
+        # Write Chromium pin priorities
+        if [ ! -f "/etc/apt/preferences.d/xtradeb-pin" ]; then
+            local pin_content="Package: *\nPin: release o=LP-PPA-xtradeb-apps\nPin-Priority: 1\n\nPackage: chromium\nPin: release o=LP-PPA-xtradeb-apps\nPin-Priority: 500\n"
+            echo -e "$pin_content" | $SUDO tee /etc/apt/preferences.d/xtradeb-pin >/dev/null
+        fi
+        
+        # Create Chromium wrapper file for root sandbox restrictions in proot
+        if [ ! -f "/usr/local/bin/chromium-wrapper" ]; then
+            local wrapper_content="#!/bin/bash\nexec chromium --no-sandbox --disable-dev-shm-usage --no-first-run \"\$@\"\n"
+            echo -e "$wrapper_content" | $SUDO tee /usr/local/bin/chromium-wrapper >/dev/null
+            $SUDO chmod +x /usr/local/bin/chromium-wrapper
+        fi
+        append_block_to_bashrc "CHROMIUM" "export CHROME_EXECUTABLE=/usr/local/bin/chromium-wrapper"
+    fi
+    
+    # 3. Download & Install Flutter SDK
+    echo -e "\n--- Step 3: Installing Flutter SDK (Git Stable) ---"
+    if [ ! -d "$TOOLS_DIR/flutter" ]; then
+        run_with_spinner "git clone https://github.com/flutter/flutter.git -b stable $TOOLS_DIR/flutter" "Cloning Flutter SDK (Branch: stable)"
+    else
+        echo -e "${CLR_VAL}[✔]${CLR_RESET} Flutter SDK folder already exists."
+    fi
+    
+    # 4. Download & Install Android Command Line Tools
+    echo -e "\n--- Step 4: Installing Android SDK Command Line Tools ---"
+    local sdk_root="$TOOLS_DIR/android-sdk"
+    local cli_zip="$sdk_root/cmdline-tools/commandlinetools-linux.zip"
+    
+    if [ ! -f "$sdk_root/cmdline-tools/latest/bin/sdkmanager" ]; then
+        mkdir -p "$sdk_root/cmdline-tools"
+        
+        # Download Android Command Line Tools
+        download_file \
+            "https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip" \
+            "$cli_zip" \
+            "Android SDK Command Line Tools"
+        
+        # Extract files
+        echo -e "${CLR_INFO}[➔]${CLR_RESET} Extracting command line tools..."
+        unzip -q "$cli_zip" -d "$sdk_root/cmdline-tools"
+        rm -f "$cli_zip"
+        
+        # Move directory to correct name structure
+        mv "$sdk_root/cmdline-tools/cmdline-tools" "$sdk_root/cmdline-tools/latest"
+        echo -e "${CLR_VAL}[✔]${CLR_RESET} Successfully configured Command Line Tools structure."
+    else
+        echo -e "${CLR_VAL}[✔]${CLR_RESET} Command Line Tools already exists."
+    fi
+    
+    # Export SDK environment paths to ~/.bashrc
+    local flutter_block='export PATH="$PATH:$HOME/tools/flutter/bin"
+export ANDROID_HOME="$HOME/tools/android-sdk"
+export ANDROID_SDK_ROOT="$HOME/tools/android-sdk"
+export PATH="$PATH:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin"
+export PATH="$PATH:$ANDROID_SDK_ROOT/platform-tools"
+export PATH="$PATH:$HOME/tools"'
+    
+    append_block_to_bashrc "FLUTTER" "$flutter_block"
+    
+    # Apply paths dynamically to the installer subshell
+    export ANDROID_HOME="$sdk_root"
+    export ANDROID_SDK_ROOT="$sdk_root"
+    export PATH="$PATH:$TOOLS_DIR/flutter/bin:$sdk_root/cmdline-tools/latest/bin:$sdk_root/platform-tools"
+    
+    # 5. Licensing and Android Components
+    echo -e "\n--- Step 5: Accepting Google Android Licenses ---"
+    yes | sdkmanager --licenses >/dev/null
+    
+    echo -e "\n--- Step 6: Installing platform-tools, platforms;android-34, build-tools;34.0.0 ---"
+    sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+    
+    # 6. Apply ARM64 Binary Overrides/Patches
+    echo -e "\n--- Step 7: Overriding SDK x86_64 binaries with local ARM64 symbols ---"
+    local platform_tools_path="$sdk_root/platform-tools"
+    local build_tools_path="$sdk_root/build-tools/34.0.0"
+    
+    if [ -f "$platform_tools_path/adb" ]; then
+        ln -sf "$(which adb)" "$platform_tools_path/adb"
+        echo -e "    Symlinked local ARM64 adb -> $platform_tools_path/adb"
+    fi
+    
+    if [ -d "$build_tools_path" ]; then
+        ln -sf "$(which aapt)" "$build_tools_path/aapt"
+        ln -sf "$(which aapt2)" "$build_tools_path/aapt2"
+        echo -e "    Symlinked local ARM64 aapt/aapt2 -> build-tools/34.0.0"
+    fi
+    
+    mkdir -p "$sdk_root/cmake/3.22.1/bin"
+    ln -sf "$(which cmake)" "$sdk_root/cmake/3.22.1/bin/cmake"
+    ln -sf "$(which ninja)" "$sdk_root/cmake/3.22.1/bin/ninja"
+    echo -e "    Symlinked local cmake/ninja -> $sdk_root/cmake/3.22.1/bin"
+    
+    # 7. Download custom ARM64 Android NDK Build (r28c)
+    echo -e "\n--- Step 8: Installing custom ARM64 NDK (r28c) ---"
+    local ndk_base="$sdk_root/ndk"
+    local ndk_target_ver="28.2.13676358"
+    local ndk_tar="$ndk_base/android-ndk-r28c-aarch64.tar.xz"
+    
+    if [ ! -d "$ndk_base/$ndk_target_ver" ]; then
+        mkdir -p "$ndk_base"
+        download_file \
+            "https://github.com/HomuHomu833/android-ndk-custom/releases/download/r28/android-ndk-r28c-aarch64-linux-android.tar.xz" \
+            "$ndk_tar" \
+            "ARM64 NDK r28c Archive"
+            
+        echo -e "${CLR_INFO}[➔]${CLR_RESET} Decompressing NDK custom port... This can take up to 2-3 minutes."
+        tar -xf "$ndk_tar" -C "$ndk_base"
+        rm -f "$ndk_tar"
+        
+        mv "$ndk_base/android-ndk-r28c" "$ndk_base/$ndk_target_ver"
+        echo -e "${CLR_VAL}[✔]${CLR_RESET} Custom NDK extraction completed successfully."
+    else
+        echo -e "${CLR_VAL}[✔]${CLR_RESET} NDK $ndk_target_ver already installed."
+    fi
+    
+    local toolchain_file="$ndk_base/$ndk_target_ver/build/cmake/android.toolchain.cmake"
+    if [ -f "$toolchain_file" ]; then
+        sed -i 's/if(CMAKE_HOST_SYSTEM_NAME STREQUAL Linux)/if(CMAKE_HOST_SYSTEM_NAME STREQUAL Android)\nset(ANDROID_HOST_TAG linux-aarch64)\nelseif(CMAKE_HOST_SYSTEM_NAME STREQUAL Linux)/g' \
+            "$toolchain_file"
+        echo -e "    Patched Android cmake toolchain file layout."
+    fi
+    
+    # Apply SDK configurations to Flutter
+    flutter config --android-sdk "$sdk_root"
+    
+    # 8. Handle Editor Configuration in Terminal mode
+    if [ "$mode" = "terminal" ]; then
+        local editor
+        editor=$(select_terminal_editor)
+        
+        if [ "$editor" = "codeserver" ] || [ "$editor" = "both" ]; then
+            echo -e "\n--- Step 9: Installing code-server (VS Code in Android browser) ---"
+            if ! command -v code-server >/dev/null 2>&1; then
+                echo -e "${CLR_INFO}[➔]${CLR_RESET} Fetching and executing code-server official installer script..."
+                curl -fsSL https://code-server.dev/install.sh | $SUDO sh
+            else
+                echo -e "${CLR_VAL}[✔]${CLR_RESET} code-server is already installed."
+            fi
+            
+            local cs_func='# cs - start code-server and open the browser automatically
+cs() {
+  local path="${1:-.}"
+  local port=8080
+  while true; do
+    if ! nc -z localhost "$port" > /dev/null 2>&1; then
+      break
+    fi
+    port=$((port + 1))
+  done
+  echo "Port $port is free, starting code-server..."
+  code-server --port "$port" --auth none "$path" &
+  sleep 2
+  local url="http://localhost:$port"
+  echo "Opening: $url"
+  termux-open-url "$url" 2>/dev/null || echo -e "\e[33mPlease open this URL in your Android browser: $url\e[0m"
+}'
+            append_block_to_bashrc "CODESERVER" "$cs_func"
+        fi
+        
+        if [ "$editor" = "ftp" ] || [ "$editor" = "both" ]; then
+            echo -e "\n--- Step 10: Configuring Python FTP Server (for Acode) ---"
+            start_ftp_server
+            
+            echo -ne "\n${CLR_MENU}[?]${CLR_RESET} Run FTP server automatically on terminal session start? (y/N): "
+            read -r run_boot
+            if [[ "$run_boot" =~ ^[Yy]$ ]]; then
+                append_block_to_bashrc "FTPBOOT" "python3 -m pyftpdlib -p 2121 -w -d $PROJECTS_DIR >/tmp/devenv_ftp.log 2>&1 &"
+                echo -e "${CLR_VAL}[✔] Registered automatic FTP server start on session login.${CLR_RESET}"
+            fi
+        fi
+        
+        show_acode_direct_path_tip
+        
+        # Print Wireless Debugging Help details
+        echo -e "\n${CLR_INFO}┌──────────────────────────────────────────────────────────────────────┐${CLR_RESET}"
+        echo -e "${CLR_INFO}│${CLR_RESET} ${CLR_TITLE}HEADLESS MOBILE DEVICE DEBUGGING GUIDE${CLR_RESET}                                ${CLR_INFO}│${CLR_RESET}"
+        echo -e "${CLR_INFO}├──────────────────────────────────────────────────────────────────────┤${CLR_RESET}"
+        echo -e "${CLR_INFO}│${CLR_RESET} 1. Open your Android Settings -> Developer Options                    ${CLR_INFO}│${CLR_RESET}"
+        echo -e "${CLR_INFO}│${CLR_RESET} 2. Toggle 'Wireless debugging' to ON                                  ${CLR_INFO}│${CLR_RESET}"
+        echo -e "${CLR_INFO}│${CLR_RESET} 3. Tap 'Pair device with pairing code'                                ${CLR_INFO}│${CLR_RESET}"
+        echo -e "${CLR_INFO}│${CLR_RESET} 4. Pair inside proot-distro shell:                                    ${CLR_INFO}│${CLR_RESET}"
+        echo -e "${CLR_INFO}│${CLR_RESET}    ${CLR_MENU}adb pair 127.0.0.1:PAIRING_PORT${CLR_RESET}                                   ${CLR_INFO}│${CLR_RESET}"
+        echo -e "${CLR_INFO}│${CLR_RESET} 5. Connect to the MAIN port listed on settings dashboard:             ${CLR_INFO}│${CLR_RESET}"
+        echo -e "${CLR_INFO}│${CLR_RESET}    ${CLR_MENU}adb connect 127.0.0.1:MAIN_PORT${CLR_RESET}                                 ${CLR_INFO}│${CLR_RESET}"
+        echo -e "${CLR_INFO}│${CLR_RESET} 6. Confirm device detection and execute hot reload run:              ${CLR_INFO}│${CLR_RESET}"
+        echo -e "${CLR_INFO}│${CLR_RESET}    ${CLR_MENU}flutter devices && flutter run${CLR_RESET}                                  ${CLR_INFO}│${CLR_RESET}"
+        echo -e "${CLR_INFO}└──────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+    fi
+    
+    # 9. Offer offline cache pre-compilation
+    local enable_offline="$CLI_OFFLINE"
+    if [ -z "$enable_offline" ]; then
+        echo -ne "\n${CLR_MENU}[?]${CLR_RESET} Pre-populate Android SDK & Gradle Caches for Offline Development? (y/N): "
+        read -r enable_offline
+    fi
+    if [[ "$enable_offline" =~ ^([Yy]|true)$ ]]; then
+        configure_offline_flutter_templates
+    fi
+    
+    # Trigger first doctor run
+    echo -e "\n--- Step 11: Testing components via 'flutter doctor' ---"
+    flutter doctor
+    
+    mkdir -p "$PROJECTS_DIR"
+    
+    echo -e "\n${CLR_VAL}✔ Flutter & Android App Suite setup complete!${CLR_RESET}"
+    echo -e "${CLR_WARN}[!] Action Needed:${CLR_RESET} Please run: ${CLR_MENU}source ~/.bashrc${CLR_RESET} to enable settings."
+}
+
+remove_flutter_android_env() {
+    echo -e "${CLR_WARN}[!] WARNING: You are about to remove Flutter & Android Suite.${CLR_RESET}"
+    echo -e "    This will completely delete the SDK directories and configurations."
+    echo -ne "    Do you want to proceed? (y/N): "
+    read -r response
+    if [[ ! "$response" =~ ^[Yy]$ ]]; then
+        echo -e "${CLR_ERR}Removal cancelled.${CLR_RESET}"
+        return 1
+    fi
+    
+    # Remove paths from bashrc
+    remove_block_from_bashrc "FLUTTER"
+    remove_block_from_bashrc "CHROMIUM"
+    remove_block_from_bashrc "CODESERVER"
+    remove_block_from_bashrc "FTPBOOT"
+    
+    # Delete directory
+    echo -e "${CLR_INFO}[➔] Deleting SDK directories...${CLR_RESET}"
+    run_with_spinner "rm -rf '$TOOLS_DIR/flutter' '$TOOLS_DIR/android-sdk'" "Deleting Flutter and Android SDKs"
+    
+    echo -e "${CLR_VAL}[✔] Flutter & Android App Suite successfully removed.${CLR_RESET}"
+}
+
+# ==============================================================================
+# ENVIRONMENT 3: POSTGRESQL DATABASE SERVER
+# ==============================================================================
+
+check_postgresql_status() {
+    if check_apt_pkg "postgresql" && [ -f "/var/lib/postgresql/17/main/PG_VERSION" ]; then
+        echo -e "${CLR_VAL}[Fully Installed]${CLR_RESET}"
+    elif ! check_apt_pkg "postgresql" && [ ! -d "/var/lib/postgresql/17/main" ]; then
+        echo -e "${CLR_ERR}[Not Installed]${CLR_RESET}"
+    else
+        echo -e "${CLR_WARN}[Partially Installed]${CLR_RESET}"
+    fi
+}
+
+install_postgresql_env() {
+    echo -e "\n${CLR_TITLE}Installing PostgreSQL Database Server...${CLR_RESET}"
+    echo -e "${CLR_WARN}[!] Storage Note:${CLR_RESET} Requires ~35 MB download / ~100 MB disk space."
+    echo -e "${CLR_WARN}[!] System Path:${CLR_RESET} /var/lib/postgresql/17"
+    echo -e "${CLR_WARN}[!] Warnings:${CLR_RESET} PRoot prevents normal service start scripts."
+    echo -e "    We initialize it manually and manage starting/stopping via bashrc command aliases."
+    
+    # 1. Install APT Package
+    echo -e "\n--- Step 1: Installing postgresql server ---"
+    run_with_spinner "$SUDO apt update" "Syncing repositories"
+    if ! check_apt_pkg "postgresql"; then
+        run_with_spinner "$SUDO apt install -y postgresql" "Installing PostgreSQL package"
+    else
+        echo -e "${CLR_VAL}[✔]${CLR_RESET} postgresql package already installed."
+    fi
+    
+    # 2. Setup storage directory & permissions
+    echo -e "\n--- Step 2: Configuring postgres data cluster directory ---"
+    $SUDO mkdir -p /var/lib/postgresql/17/main
+    $SUDO chown -R postgres:postgres /var/lib/postgresql/17
+    
+    # 3. Initialize db cluster as postgres system user
+    if [ ! -f "/var/lib/postgresql/17/main/PG_VERSION" ]; then
+        run_with_spinner "$SUDO su -s /bin/bash postgres -c \"/usr/lib/postgresql/17/bin/initdb -D /var/lib/postgresql/17/main\"" \
+            "Initializing PostgreSQL database cluster"
+    else
+        echo -e "${CLR_VAL}[✔]${CLR_RESET} PostgreSQL cluster already initialized."
+    fi
+    
+    # 4. Add aliases for database control to ~/.bashrc
+    echo -e "\n--- Step 3: Configuring bash control aliases ---"
+    local postgres_block="# PostgreSQL Control Aliases
+alias pgstart='su -s /bin/bash postgres -c \"/usr/lib/postgresql/17/bin/pg_ctl -D /var/lib/postgresql/17/main -l /var/log/postgresql/postgres.log start\"'
+alias pgstop='su -s /bin/bash postgres -c \"/usr/lib/postgresql/17/bin/pg_ctl -D /var/lib/postgresql/17/main stop\"'
+alias pgdb='su -s /bin/bash postgres -c \"psql\"'"
+
+    if append_block_to_bashrc "POSTGRES" "$postgres_block"; then
+        echo -e "${CLR_VAL}[✔]${CLR_RESET} Added database shortcuts to ~/.bashrc:"
+        echo -e "    ${CLR_MENU}pgstart${CLR_RESET} -> Starts PostgreSQL Database Server"
+        echo -e "    ${CLR_MENU}pgstop${CLR_RESET}  -> Stops Database Server"
+        echo -e "    ${CLR_MENU}pgdb${CLR_RESET}    -> Opens the admin SQL command shell (psql)"
+    fi
+    
+    # Attempt server start
+    echo -e "\n--- Step 4: Starting PostgreSQL Database Service ---"
+    $SUDO su -s /bin/bash postgres -c "/usr/lib/postgresql/17/bin/pg_ctl -D /var/lib/postgresql/17/main -l /var/log/postgresql/postgres.log start"
+    
+    echo -e "\n${CLR_VAL}✔ PostgreSQL Database Server setup complete!${CLR_RESET}"
+    echo -e "${CLR_INFO}[*] Info:${CLR_RESET} You can run ${CLR_MENU}pgdb${CLR_RESET} now to configure schemas."
+    echo -e "${CLR_WARN}[!] Action Needed:${CLR_RESET} Please run: ${CLR_MENU}source ~/.bashrc${CLR_RESET} to enable settings."
+}
+
+remove_postgresql_env() {
+    echo -e "${CLR_WARN}[!] WARNING: You are about to remove PostgreSQL Database Server.${CLR_RESET}"
+    echo -e "    This will stop the server, purge postgresql packages, and delete data clusters:"
+    echo -e "    - /var/lib/postgresql"
+    echo -ne "    Do you want to proceed? (y/N): "
+    read -r response
+    if [[ ! "$response" =~ ^[Yy]$ ]]; then
+        echo -e "${CLR_ERR}Removal cancelled.${CLR_RESET}"
+        return 1
+    fi
+    
+    # Stop database server
+    echo -e "${CLR_INFO}[➔] Stopping PostgreSQL service...${CLR_RESET}"
+    $SUDO su -s /bin/bash postgres -c "/usr/lib/postgresql/17/bin/pg_ctl -D /var/lib/postgresql/17/main stop" >/dev/null 2>&1
+    
+    # Remove shortcuts
+    remove_block_from_bashrc "POSTGRES"
+    
+    # Purge package and storage
+    run_with_spinner "$SUDO apt purge -y postgresql" "Purging PostgreSQL package"
+    run_with_spinner "$SUDO rm -rf /var/lib/postgresql" "Deleting PostgreSQL storage data"
+    
+    echo -e "${CLR_VAL}[✔] PostgreSQL Database Server successfully removed.${CLR_RESET}"
+}
+
+# ==============================================================================
+# PROJECT INSTANTIATION & OFFLINE TOGGLE UTILITIES
+# ==============================================================================
+
+create_project_from_template() {
+    local template="$1"
+    local name="$2"
+    
+    if [ -z "$template" ] || [ -z "$name" ]; then
+        echo -e "${CLR_ERR}[✘] Error: Specify a template and a new project name.${CLR_RESET}"
+        echo -e "Usage: devenv-pocket create <template> <project-name>"
+        echo -e "Available templates: ${CLR_MENU}react${CLR_RESET}, ${CLR_MENU}node${CLR_RESET}, ${CLR_MENU}flutter${CLR_RESET}"
+        return 1
+    fi
+    
+    local source_dir=""
+    case "$template" in
+        react) source_dir="$TEMPLATES_DIR/react-vite-ts" ;;
+        node) source_dir="$TEMPLATES_DIR/node-postgres" ;;
+        flutter) source_dir="$TEMPLATES_DIR/flutter-starter" ;;
+        *)
+            echo -e "${CLR_ERR}[✘] Error: Unknown template '$template'. Available: react, node, flutter.${CLR_RESET}"
+            return 1
+            ;;
+    esac
+    
+    if [ ! -d "$source_dir" ]; then
+        echo -e "${CLR_ERR}[✘] Error: Template '$template' is not cached locally.${CLR_RESET}"
+        echo -e "Please configure Node or Flutter first and select 'y' to offline caching."
+        return 1
+    fi
+    
+    local target_dir="$PROJECTS_DIR/$name"
+    if [ -d "$target_dir" ]; then
+        echo -e "${CLR_ERR}[✘] Error: Target directory '$target_dir' already exists.${CLR_RESET}"
+        return 1
+    fi
+    
+    mkdir -p "$PROJECTS_DIR"
+    echo -e "${CLR_INFO}[➔] Creating new project '$name' from template '$template'...${CLR_RESET}"
+    
+    # Content-addressable link duplicate copying
+    cp -rp "$source_dir" "$target_dir"
+    
+    # Post-process configs based on template type
+    if [ "$template" = "react" ] || [ "$template" = "node" ]; then
+        # Rename package name in package.json
+        if [ -f "$target_dir/package.json" ]; then
+            sed -i 's/"name": ".*-template"/"name": "'"$name"'"/' "$target_dir/package.json"
+        fi
+    fi
+    
+    echo -e "\n${CLR_MENU}┌──────────────────────────────────────────────────────────────────────┐${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET} 🎉 ${CLR_TITLE}PROJECT STARTER SUCCESSFULLY INSTANTIATED!${CLR_RESET}                        ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}├──────────────────────────────────────────────────────────────────────┤${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET} Your project is ready offline in under 3 seconds!                     ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET} Location: ${CLR_VAL}$target_dir${CLR_RESET}                                         ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET}                                                                      ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET} To start coding:                                                      ${CLR_MENU}│${CLR_RESET}"
+    echo -e "${CLR_MENU}│${CLR_RESET}   ${CLR_MENU}cd $target_dir${CLR_RESET}                                                    ${CLR_MENU}│${CLR_RESET}"
+    if [ "$template" = "react" ]; then
+        echo -e "${CLR_MENU}│${CLR_RESET}   ${CLR_MENU}pnpm dev${CLR_RESET} (Vite server starts offline instantly)                 ${CLR_MENU}│${CLR_RESET}"
+    elif [ "$template" = "node" ]; then
+        echo -e "${CLR_MENU}│${CLR_RESET}   ${CLR_MENU}pnpm start${CLR_RESET}                                                      ${CLR_MENU}│${CLR_RESET}"
+    elif [ "$template" = "flutter" ]; then
+        echo -e "${CLR_MENU}│${CLR_RESET}   ${CLR_MENU}flutter run${CLR_RESET}                                                 ${CLR_MENU}│${CLR_RESET}"
+    fi
+    echo -e "${CLR_MENU}└──────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+}
+
+toggle_offline_mode() {
+    local state="$1"
+    local gradle_props="$HOME/.gradle/gradle.properties"
+    
+    if [ -z "$state" ]; then
+        if [ -f "$gradle_props" ] && grep -qF "org.gradle.offline=true" "$gradle_props"; then
+            echo -e "Gradle Offline Mode is currently: ${CLR_VAL}ON${CLR_RESET}"
+        else
+            echo -e "Gradle Offline Mode is currently: ${CLR_ERR}OFF${CLR_RESET}"
+        fi
+        echo -e "Usage: devenv-pocket offline [on | off]"
+        return 0
+    fi
+    
+    mkdir -p "$(dirname "$gradle_props")"
+    touch "$gradle_props"
+    
+    if [ "$state" = "on" ]; then
+        sed -i '/org.gradle.offline/d' "$gradle_props"
+        echo "org.gradle.offline=true" >> "$gradle_props"
+        echo -e "${CLR_VAL}[✔] Gradle Offline Mode enabled (org.gradle.offline=true).${CLR_RESET}"
+        echo -e "    Gradle will now build applications strictly from local caches."
+    elif [ "$state" = "off" ]; then
+        sed -i '/org.gradle.offline/d' "$gradle_props"
+        echo -e "${CLR_VAL}[✔] Gradle Offline Mode disabled.${CLR_RESET}"
+    else
+        echo -e "${CLR_ERR}[✘] Error: Unknown state '$state'. Available: on, off.${CLR_RESET}"
+    fi
+}
+
+# ==============================================================================
+# BASHRC REPAIR & UTILITIES
+# ==============================================================================
+
+patch_gradle_cache() {
+    echo -e "\n${CLR_TITLE}Executing Gradle Cache JARs Patch...${CLR_RESET}"
+    echo -e "${CLR_INFO}[➔]${CLR_RESET} Searching Gradle caches for x86_64 aapt2 packages..."
+    
+    local jar_count=0
+    if [ -d "$HOME/.gradle" ]; then
+        find "$HOME/.gradle" -name "aapt2-*-linux.jar" 2>/dev/null | while read -r jar; do
+            echo -e "  Patching: $jar"
+            jar -u -f "$jar" -C /usr/bin aapt2 2>/dev/null
+            ((jar_count++))
+        done
+        echo -e "${CLR_VAL}[✔]${CLR_RESET} Patched $jar_count active Gradle JAR containers."
+    else
+        echo -e "${CLR_WARN}[!] Warning:${CLR_RESET} No ~/.gradle directory found. Run a flutter build first."
+    fi
+}
+
+run_diagnostics() {
+    print_header
+    get_system_info
+    
+    echo -e "\n${CLR_TITLE}Component Check Details:${CLR_RESET}"
+    draw_line "─"
+    
+    printf " %-30s : " "Base tools package count"
+    local base_pkgs=(curl git unzip xz-utils zip wget nodejs npm openjdk-17-jdk android-tools-adb aapt clang cmake ninja-build lld binutils python3 python3-pip software-properties-common)
+    local installed_count=0
+    for pkg in "${base_pkgs[@]}"; do
+        if check_apt_pkg "$pkg"; then ((installed_count++)); fi
+    done
+    echo -e "$installed_count/${#base_pkgs[@]} packages installed"
+    
+    printf " %-30s : " "pnpm Package Manager"
+    if command -v pnpm >/dev/null 2>&1; then echo -e "${CLR_VAL}Available ($(pnpm -v))${CLR_RESET}"; else echo -e "${CLR_ERR}Missing${CLR_RESET}"; fi
+    
+    printf " %-30s : " "Chromium Browser wrapper"
+    if [ -f "/usr/local/bin/chromium-wrapper" ]; then echo -e "${CLR_VAL}Active${CLR_RESET}"; else echo -e "${CLR_ERR}Missing${CLR_RESET}"; fi
+    
+    printf " %-30s : " "Flutter SDK binaries"
+    if command -v flutter >/dev/null 2>&1; then echo -e "${CLR_VAL}Installed ($(flutter --version | head -n 1))${CLR_RESET}"; else echo -e "${CLR_ERR}Missing${CLR_RESET}"; fi
+    
+    printf " %-30s : " "Android SDK Manager"
+    if [ -f "$TOOLS_DIR/android-sdk/cmdline-tools/latest/bin/sdkmanager" ]; then echo -e "${CLR_VAL}Installed${CLR_RESET}"; else echo -e "${CLR_ERR}Missing${CLR_RESET}"; fi
+    
+    printf " %-30s : " "Android platform target 34"
+    if [ -d "$TOOLS_DIR/android-sdk/platforms/android-34" ]; then echo -e "${CLR_VAL}Installed${CLR_RESET}"; else echo -e "${CLR_ERR}Missing${CLR_RESET}"; fi
+    
+    printf " %-30s : " "Custom ARM64 NDK r28c"
+    if [ -d "$TOOLS_DIR/android-sdk/ndk/28.2.13676358" ]; then echo -e "${CLR_VAL}Installed${CLR_RESET}"; else echo -e "${CLR_ERR}Missing${CLR_RESET}"; fi
+    
+    printf " %-30s : " "code-server (VS Code web)"
+    if command -v code-server >/dev/null 2>&1; then echo -e "${CLR_VAL}Available${CLR_RESET}"; else echo -e "${CLR_ERR}Missing${CLR_RESET}"; fi
+    
+    printf " %-30s : " "PostgreSQL Service Shell"
+    if [ -f "/var/lib/postgresql/17/main/PG_VERSION" ]; then echo -e "${CLR_VAL}Active${CLR_RESET}"; else echo -e "${CLR_ERR}Missing${CLR_RESET}"; fi
+    
+    printf " %-30s : " "Offline Project Templates"
+    local t_count=0
+    for t in react-vite-ts node-postgres flutter-starter; do
+        if [ -d "$TEMPLATES_DIR/$t" ]; then ((t_count++)); fi
+    done
+    if [ $t_count -eq 3 ]; then echo -e "${CLR_VAL}All Templates Configured ($t_count/3)${CLR_RESET}"; else echo -e "${CLR_WARN}Partially Cached ($t_count/3)${CLR_RESET}"; fi
+    
+    draw_line "─"
+}
+
+# ==============================================================================
+# MENU DASHBOARD & CLI HELP
+# ==============================================================================
+
+print_cli_help() {
+    print_header
+    echo -e " ${CLR_TITLE}CLI COMMAND LINE USAGE:${CLR_RESET}"
+    echo -e "   devenv-pocket                         Launch the interactive dashboard wizard (default)"
+    echo -e "   devenv-pocket install <env>           Automated unattended setup of a specific environment"
+    echo -e "   devenv-pocket remove <env>            Uninstall and delete files for a specific environment"
+    echo -e "   devenv-pocket status                  Display quick system diagnostics & check component states"
+    echo -e "   devenv-pocket patch                   Patch aapt2 binaries inside existing Gradle jar cache directories"
+    echo -e "   devenv-pocket ftpstart                Start background FTP file sharing for Acode editor access"
+    echo -e "   devenv-pocket ftpstop                 Stop background FTP server process"
+    echo -e "   devenv-pocket create <temp> <name>    Instantiate a new project instantly offline from local templates"
+    echo -e "   devenv-pocket offline [on | off]      Enable or disable Gradle compile offline mode parameters"
+    echo -e "   devenv-pocket help                    Show this command-line options help list"
+    echo ""
+    echo -e " ${CLR_TITLE}OPTIONAL MODIFIERS (Bypass interactive wizards):${CLR_RESET}"
+    echo -e "   ${CLR_MENU}--terminal${CLR_RESET} or ${CLR_MENU}-t${CLR_RESET}         : Enforce Terminal / Headless mode configurations"
+    echo -e "   ${CLR_MENU}--graphical${CLR_RESET} or ${CLR_MENU}-g${CLR_RESET}        : Enforce Graphical Desktop mode (X11 Chromium / PPA)"
+    echo -e "   ${CLR_MENU}--editor=<opt>${CLR_RESET} or ${CLR_MENU}-e=<opt>${CLR_RESET}   : Headless editor selection: codeserver, ftp, both, none"
+    echo -e "   ${CLR_MENU}--offline${CLR_RESET} or ${CLR_MENU}-o${CLR_RESET}          : Automatically populates/caches offline environment starter libraries"
+    echo ""
+    echo -e " ${CLR_TITLE}AVAILABLE ENVIRONMENT PROFILES (<env>):${CLR_RESET}"
+    echo -e "   ${CLR_MENU}node${CLR_RESET}      : Node.js & Web development tools (NPM, pnpm, Chromium, code-server)"
+    echo -e "   ${CLR_MENU}flutter${CLR_RESET}   : Flutter & Android App developer SDKs (NDK, Platform Tools API 34)"
+    echo -e "   ${CLR_MENU}postgres${CLR_RESET}  : PostgreSQL Database Server setup & aliases configuration"
+    echo -e "   ${CLR_MENU}all${CLR_RESET}       : Set up all the profiles combined into a complete development workstation"
+    echo ""
+    echo -e " ${CLR_TITLE}TEMPLATES (<temp>):${CLR_RESET} ${CLR_MENU}react${CLR_RESET} (Vite+TS), ${CLR_MENU}node${CLR_RESET} (Express), ${CLR_MENU}flutter${CLR_RESET} (Starter App)"
+    draw_line "─"
+}
+
+uninstall_menu() {
+    print_header
+    echo -e " ${CLR_TITLE}UNINSTALL / CLEANLY REMOVE ENVIRONMENT PROFILES:${CLR_RESET}"
+    draw_line "─"
+    echo -e " [1] Node.js & Web Development Profile"
+    echo -e " [2] Flutter & Android App Suite"
+    echo -e " [3] PostgreSQL Database Server"
+    echo -e " [4] Remove Complete Developer Suite (Wipes all profiles)"
+    echo -e " [5] Cancel and return"
+    draw_line "─"
+    echo -ne " ${CLR_MENU}Select environment to cleanly remove (1-5):${CLR_RESET} "
+    read -r u_choice
+    
+    case $u_choice in
+        1)
+            remove_node_web_env
+            ;;
+        2)
+            remove_flutter_android_env
+            ;;
+        3)
+            remove_postgresql_env
+            ;;
+        4)
+            remove_node_web_env
+            remove_flutter_android_env
+            remove_postgresql_env
+            ;;
+        5)
+            echo -e "Cancelled."
+            ;;
+        *)
+            echo -e "${CLR_ERR}Invalid option.${CLR_RESET}"
+            ;;
+    esac
+}
+
+main_menu() {
+    while true; do
+        print_header
+        
+        echo -e "${CLR_WARN}[!] Distro Warning:${CLR_RESET} This script downloads ARM64 packages. Make sure you"
+        echo -e "    run this within a Linux distro (e.g. proot-distro Ubuntu) on ARM64 processors."
+        echo -e "    Directories used: Applications -> ${CLR_MENU}$TOOLS_DIR${CLR_RESET}, Projects -> ${CLR_MENU}$PROJECTS_DIR${CLR_RESET}."
+        draw_line "─"
+        
+        # Display environments status cards
+        echo -e " ${CLR_TITLE}DEVELOPER ENVIRONMENT PROFILES STATUS:${CLR_RESET}"
+        
+        # Environment 1
+        printf " [1] %-36s : " "Node.js & Web Development Profile"
+        check_node_web_status
+        echo -e "     - Ext. size: ~150 MB CLI / ~1.2 GB Graphical"
+        echo -e "     - Includes: npm, pnpm, Chromium web debug wrapper, code-server web VS Code"
+        
+        # Environment 2
+        printf " [2] %-36s : " "Flutter & Android App Suite"
+        check_flutter_android_status
+        echo -e "     - Ext. size: ~1.5 GB Download / ~5.5 GB Disk Space"
+        echo -e "     - Includes: Flutter Git SDK, OpenJDK-17, Android tools, custom ARM64 NDK"
+        
+        # Environment 3
+        printf " [3] %-36s : " "PostgreSQL Database Server"
+        check_postgresql_status
+        echo -e "     - Ext. size: ~35 MB Download / ~100 MB Disk Space"
+        echo -e "     - Includes: Server, data directory initialization, terminal control aliases"
+        
+        # Environment 4
+        echo -e " [4] \e[1mInstall Complete Developer Suite\e[0m (Combine Node.js + Flutter + PostgreSQL)"
+        echo -e "     - Ext. size: ~2.0 GB Download / ~6.8 GB Disk Space"
+        
+        # Additional Utilities
+        echo -e " [5] Uninstall / Cleanly Remove an Environment Profile"
+        echo -e " [6] Run Detailed System Diagnostics"
+        echo -e " [7] Patch Gradle aapt2 Jar Caches (Fix building issues)"
+        echo -e " [8] Exit devenv-pocket"
+        
+        draw_line "─"
+        echo -ne " ${CLR_MENU}Select an option (1-8):${CLR_RESET} "
+        read -r choice
+        
+        case $choice in
+            1)
+                install_node_web_env
+                echo -e "\nPress any key to return to menu..."
+                read -rn 1
+                ;;
+            2)
+                install_flutter_android_env
+                echo -e "\nPress any key to return to menu..."
+                read -rn 1
+                ;;
+            3)
+                install_postgresql_env
+                echo -e "\nPress any key to return to menu..."
+                read -rn 1
+                ;;
+            4)
+                install_node_web_env
+                install_flutter_android_env
+                install_postgresql_env
+                echo -e "\nPress any key to return to menu..."
+                read -rn 1
+                ;;
+            5)
+                uninstall_menu
+                echo -e "\nPress any key to return to menu..."
+                read -rn 1
+                ;;
+            6)
+                run_diagnostics
+                echo -e "\nPress any key to return to menu..."
+                read -rn 1
+                ;;
+            7)
+                patch_gradle_cache
+                echo -e "\nPress any key to return to menu..."
+                read -rn 1
+                ;;
+            8)
+                echo -e "\n${CLR_VAL}Exiting devenv-pocket. Happy coding!${CLR_RESET}"
+                exit 0
+                ;;
+            *)
+                echo -e "${CLR_ERR}Invalid option, press any key to try again...${CLR_RESET}"
+                read -rn 1
+                ;;
+        esac
+    done
+}
+
+# ==============================================================================
+# MAIN EXECUTION ENTRYPOINT
+# ==============================================================================
+
+# 1. Pre-parse optional CLI flags from parameters list
+NEW_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --terminal|-t)
+            CLI_MODE="terminal"
+            ;;
+        --graphical|-g)
+            CLI_MODE="graphical"
+            ;;
+        --editor=*|-e=*)
+            CLI_EDITOR="${arg#*=}"
+            ;;
+        --offline|-o)
+            CLI_OFFLINE="true"
+            ;;
+        *)
+            NEW_ARGS+=("$arg")
+            ;;
+    esac
+done
+# Re-set positional parameters to the filtered arguments
+set -- "${NEW_ARGS[@]}"
+
+# 2. Architecture Check Warnings
+HOST_ARCH=$(uname -m)
+if [ "$HOST_ARCH" != "aarch64" ] && [ "$HOST_ARCH" != "arm64" ]; then
+    echo -e "${CLR_WARN}[!] ARCHITECTURE WARNING:${CLR_RESET}"
+    echo -e "    This tool compiles and configures tools specifically for ARM64 architectures (aarch64)."
+    echo -e "    Your CPU reports: ${CLR_ERR}$HOST_ARCH${CLR_RESET}."
+    echo -e "    If you run this on a standard x86-64 machine, some compiler features (like NDK & AAPT overrides) will break."
+    echo -ne "    Do you want to continue running the script? (y/N): "
+    read -r response
+    if [[ ! "$response" =~ ^[Yy]$ ]]; then
+        echo -e "${CLR_ERR}Execution cancelled.${CLR_RESET}"
+        exit 1
+    fi
+fi
+
+# 3. Self-Registration on System PATH
+SCRIPT_PATH=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}" 2>/dev/null)
+if [ -n "$SCRIPT_PATH" ]; then
+    if [ "$SCRIPT_PATH" != "/usr/local/bin/devenv-pocket" ] && [ -d "/usr/local/bin" ]; then
+        if [ ! -L "/usr/local/bin/devenv-pocket" ] && [ ! -f "/usr/local/bin/devenv-pocket" ]; then
+            echo -e "${CLR_INFO}[➔] Registering devenv-pocket globally in /usr/local/bin/devenv-pocket...${CLR_RESET}"
+            $SUDO ln -sf "$SCRIPT_PATH" "/usr/local/bin/devenv-pocket" 2>/dev/null
+            $SUDO chmod +x "$SCRIPT_PATH" 2>/dev/null
+            $SUDO chmod +x "/usr/local/bin/devenv-pocket" 2>/dev/null
+        fi
+    fi
+fi
+
+# 4. CLI Arguments Routing
+if [ $# -gt 0 ]; then
+    case "$1" in
+        help|--help|-h)
+            print_cli_help
+            exit 0
+            ;;
+        status|check|diagnostics)
+            run_diagnostics
+            exit 0
+            ;;
+        patch)
+            patch_gradle_cache
+            exit 0
+            ;;
+        ftpstart)
+            start_ftp_server
+            exit 0
+            ;;
+        ftpstop)
+            stop_ftp_server
+            exit 0
+            ;;
+        create)
+            create_project_from_template "$2" "$3"
+            exit 0
+            ;;
+        offline)
+            toggle_offline_mode "$2"
+            exit 0
+            ;;
+        install)
+            if [ -z "$2" ]; then
+                echo -e "${CLR_ERR}[✘] Error: Specify an environment to install (node, flutter, postgres, all).${CLR_RESET}"
+                echo -e "Usage: devenv-pocket install <env>"
+                exit 1
+            fi
+            
+            # Unattended mode default mode to terminal if not provided
+            if [ -z "$CLI_MODE" ]; then
+                CLI_MODE="terminal"
+            fi
+            if [ -z "$CLI_EDITOR" ]; then
+                CLI_EDITOR="both"
+            fi
+            
+            case "$2" in
+                node) install_node_web_env ;;
+                flutter) install_flutter_android_env ;;
+                postgres) install_postgresql_env ;;
+                all)
+                    install_node_web_env
+                    install_flutter_android_env
+                    install_postgresql_env
+                    ;;
+                *)
+                    echo -e "${CLR_ERR}[✘] Error: Unknown environment '$2'. Available: node, flutter, postgres, all.${CLR_RESET}"
+                    exit 1
+                    ;;
+            esac
+            exit 0
+            ;;
+        remove|uninstall)
+            if [ -z "$2" ]; then
+                echo -e "${CLR_ERR}[✘] Error: Specify an environment to remove (node, flutter, postgres, all).${CLR_RESET}"
+                echo -e "Usage: devenv-pocket remove <env>"
+                exit 1
+            fi
+            case "$2" in
+                node) remove_node_web_env ;;
+                flutter) remove_flutter_android_env ;;
+                postgres) remove_postgresql_env ;;
+                all)
+                    remove_node_web_env
+                    remove_flutter_android_env
+                    remove_postgresql_env
+                    ;;
+                *)
+                    echo -e "${CLR_ERR}[✘] Error: Unknown environment '$2'. Available: node, flutter, postgres, all.${CLR_RESET}"
+                    exit 1
+                    ;;
+            esac
+            exit 0
+            ;;
+        *)
+            echo -e "${CLR_ERR}[✘] Error: Unknown command '$1'.${CLR_RESET}"
+            echo -e "Type ${CLR_MENU}devenv-pocket help${CLR_RESET} to view all available commands."
+            exit 1
+            ;;
+    esac
+fi
+
+# Run the interactive menu loop if no arguments are passed
+main_menu
