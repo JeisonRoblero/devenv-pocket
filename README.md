@@ -19,7 +19,7 @@ Run React/Vite web services, Flutter/Android compilations, and PostgreSQL databa
 <br>
 
 <div align="center">
-<a href="https://raw.githubusercontent.com/JeisonRoblero/devenv-pocket/main/devenv-pocket" target="_blank" rel="noopener noreferrer">
+<a href="https://cdn.jsdelivr.net/gh/JeisonRoblero/devenv-pocket@main/devenv-pocket" target="_blank" rel="noopener noreferrer">
   <img src="https://img.shields.io/badge/DOWNLOAD_SCRIPT-Direct_Download_Link-0078D4?style=for-the-badge&logo=git&logoColor=white" alt="Download devenv-pocket" />
 </a>
 </div>
