@@ -45,24 +45,143 @@ fi
 # Print beautiful centered banners
 draw_line() {
     local char="${1:-─}"
-    local width=70
+    local width
+    width=$(tput cols 2>/dev/null || echo 70)
+    if [ -z "$width" ] || [ "$width" -lt 10 ]; then width=70; fi
+    if [ "$width" -gt 70 ]; then width=70; fi
     printf "${CLR_MENU}"
     for ((i=0; i<width; i++)); do printf "%s" "$char"; done
     printf "${CLR_RESET}\n"
 }
 
+center_text() {
+    local text="$1"
+    local width
+    width=$(tput cols 2>/dev/null || echo 70)
+    if [ -z "$width" ] || [ "$width" -lt 10 ]; then width=70; fi
+    if [ "$width" -gt 70 ]; then width=70; fi
+    
+    # Strip ANSI color codes to calculate correct string length
+    local clean_text
+    clean_text=$(echo -e "$text" | sed 's/\x1b\[[0-9;]*m//g')
+    
+    local pad=$(( (width - ${#clean_text}) / 2 ))
+    if [ $pad -lt 0 ]; then pad=0; fi
+    for ((i=0; i<pad; i++)); do printf " "; done
+    echo -e "$text"
+}
+
+print_indented_bullet() {
+    local bullet="$1"
+    local text="$2"
+    local cols
+    cols=$(tput cols 2>/dev/null || echo 70)
+    if [ -z "$cols" ] || [ "$cols" -lt 10 ]; then cols=70; fi
+    if [ "$cols" -gt 70 ]; then cols=70; fi
+    
+    # Strip ANSI color codes from bullet to find real indent length
+    local clean_bullet
+    clean_bullet=$(echo -e "$bullet" | sed 's/\x1b\[[0-9;]*m//g')
+    local indent_len=${#clean_bullet}
+    
+    local max_text_width=$((cols - indent_len))
+    if [ $max_text_width -lt 15 ]; then
+        # If terminal is too narrow, just print normally
+        echo -e "${bullet}${text}"
+        return
+    fi
+    
+    local spaces=""
+    for ((i=0; i<indent_len; i++)); do spaces="${spaces} "; done
+    
+    # Wrap text into lines of max_text_width
+    local words=($text)
+    local current_line=""
+    local first=true
+    
+    for word in "${words[@]}"; do
+        local temp_line
+        if [ -z "$current_line" ]; then
+            temp_line="$word"
+        else
+            temp_line="$current_line $word"
+        fi
+        
+        if [ ${#temp_line} -le $max_text_width ]; then
+            current_line="$temp_line"
+        else
+            if $first; then
+                echo -e "${bullet}${current_line}"
+                first=false
+            else
+                echo -e "${spaces}${current_line}"
+            fi
+            current_line="$word"
+        fi
+    done
+    
+    if [ -n "$current_line" ]; then
+        if $first; then
+            echo -e "${bullet}${current_line}"
+        else
+            echo -e "${spaces}${current_line}"
+        fi
+    fi
+}
+
+print_profile_status() {
+    local num="$1"
+    local title="$2"
+    local status_func="$3"
+    
+    local cols
+    cols=$(tput cols 2>/dev/null || echo 70)
+    if [ -z "$cols" ] || [ "$cols" -lt 10 ]; then cols=70; fi
+    if [ "$cols" -gt 70 ]; then cols=70; fi
+    
+    local status_val
+    status_val=$($status_func)
+    
+    if [ "$cols" -ge 55 ]; then
+        local pad_w=37
+        if [ "$cols" -lt 60 ]; then
+            pad_w=33
+        fi
+        printf "[%s] %-${pad_w}s : %b\n" "$num" "$title" "$status_val"
+    else
+        echo -e "[${num}] ${title}"
+        echo -e "    Status: ${status_val}"
+    fi
+}
+
 print_header() {
     clear
     draw_line "═"
-    echo -e "   ${CLR_TITLE}___                               ____             _        ${CLR_RESET}"
-    echo -e "  ${CLR_TITLE}/ _ \\\___ _  _____ _ __  __  __    /  _ \\ ___  ____ | | _ ___ ${CLR_RESET}"
-    echo -e " ${CLR_TITLE}/ // / -_) |/ / -_) '  \\ \\ \\/ /   /  __ // _ \\/ __/ | |/ / -_)${CLR_RESET}"
-    echo -e "${CLR_TITLE}/____/\\__/\\___/\\__/_/_/_/  \\_/    /_/    \\___/\\__/_  |___/\\__/ ${CLR_RESET}"
-    echo -e "                                                  ${CLR_TITLE}/_/          ${CLR_RESET}"
-    echo -e "         ${CLR_WARN}★ Rapid ARM64 proot-distro Dev Environment Suite ★${CLR_RESET}"
+    local cols
+    cols=$(tput cols 2>/dev/null || echo 70)
+    if [ -z "$cols" ] || [ "$cols" -lt 10 ]; then cols=70; fi
+    
+    if [ "$cols" -ge 65 ]; then
+        local pad=$(( (cols - 63) / 2 ))
+        if [ $pad -lt 0 ]; then pad=0; fi
+        local pad_str=""
+        for ((i=0; i<pad; i++)); do pad_str="${pad_str} "; done
+        
+        printf "${CLR_TITLE}"
+        printf "%s%s\n" "$pad_str" "   ___                               ____             _"
+        printf "%s%s\n" "$pad_str" "  / _ \\___ _  _____ _ __  __  __    /  _ \\ ___  ____ | | _ ___"
+        printf "%s%s\n" "$pad_str" " / // / -_) |/ / -_) '  \\ \\ \\/ /   /  __ // _ \\/ __/ | |/ / -_)"
+        printf "%s%s\n" "$pad_str" "/____/\\__/\\___/\\__/_/_/_/  \\_/    /_/    \\___/\\__/_  |___/\\__/"
+        printf "%s%s\n" "$pad_str" "                                                 /_/"
+        printf "${CLR_RESET}"
+    else
+        center_text "${CLR_TITLE}⚡ D E V E N V - P O C K E T ⚡${CLR_RESET}"
+    fi
+    
+    center_text "${CLR_WARN}★ Rapid Dev Environment Suite ★${CLR_RESET}"
     draw_line "═"
-    echo -e "${CLR_INFO}[i] GitHub recommendation: groot-desk for visual display setup:${CLR_RESET}"
-    echo -e "    https://github.com/JeisonRoblero/groot-desk"
+    center_text "${CLR_INFO}For desktop setup, we recommend groot-desk:${CLR_RESET}"
+    center_text "${CLR_INFO}https://github.com/JeisonRoblero/groot-desk${CLR_RESET}"
     draw_line "─"
 }
 
@@ -1270,12 +1389,16 @@ print_cli_help() {
 uninstall_menu() {
     print_header
     echo -e " ${CLR_TITLE}UNINSTALL / CLEANLY REMOVE ENVIRONMENT PROFILES:${CLR_RESET}"
-    draw_line "─"
-    echo -e " [1] Node.js & Web Development Profile"
-    echo -e " [2] Flutter & Android App Suite"
-    echo -e " [3] PostgreSQL Database Server"
-    echo -e " [4] Remove Complete Developer Suite (Wipes all profiles)"
-    echo -e " [5] Cancel and return"
+    echo ""
+    print_indented_bullet "[1] " "Node.js & Web Development Profile"
+    echo ""
+    print_indented_bullet "[2] " "Flutter & Android App Suite"
+    echo ""
+    print_indented_bullet "[3] " "PostgreSQL Database Server"
+    echo ""
+    print_indented_bullet "[4] " "Remove Complete Developer Suite (Wipes all profiles)"
+    echo ""
+    print_indented_bullet "[5] " "Cancel and return"
     draw_line "─"
     echo -ne " ${CLR_MENU}Select environment to cleanly remove (1-5):${CLR_RESET} "
     read -r u_choice
@@ -1308,41 +1431,43 @@ main_menu() {
     while true; do
         print_header
         
-        echo -e "${CLR_WARN}[!] Distro Warning:${CLR_RESET} This script downloads ARM64 packages. Make sure you"
-        echo -e "    run this within a Linux distro (e.g. proot-distro Ubuntu) on ARM64 processors."
-        echo -e "    Directories used: Applications -> ${CLR_MENU}$TOOLS_DIR${CLR_RESET}, Projects -> ${CLR_MENU}$PROJECTS_DIR${CLR_RESET}."
-        draw_line "─"
-        
         # Display environments status cards
         echo -e " ${CLR_TITLE}DEVELOPER ENVIRONMENT PROFILES STATUS:${CLR_RESET}"
+        echo ""
         
         # Environment 1
-        printf " [1] %-36s : " "Node.js & Web Development Profile"
-        check_node_web_status
-        echo -e "     - Ext. size: ~150 MB CLI / ~1.2 GB Graphical"
-        echo -e "     - Includes: npm, pnpm, Chromium web debug wrapper, code-server web VS Code"
+        print_profile_status "1" "Node.js & Web Development Profile" "check_node_web_status"
+        print_indented_bullet "    - Size: " "~150 MB CLI / ~1.2 GB Graphical"
+        print_indented_bullet "    - Includes: " "npm, pnpm, Chromium web debug wrapper, code-server web VS Code"
+        echo ""
         
         # Environment 2
-        printf " [2] %-36s : " "Flutter & Android App Suite"
-        check_flutter_android_status
-        echo -e "     - Ext. size: ~1.5 GB Download / ~5.5 GB Disk Space"
-        echo -e "     - Includes: Flutter Git SDK, OpenJDK-17, Android tools, custom ARM64 NDK"
+        print_profile_status "2" "Flutter & Android App Suite" "check_flutter_android_status"
+        print_indented_bullet "    - Size: " "~1.5 GB Download / ~5.5 GB Disk Space"
+        print_indented_bullet "    - Includes: " "Flutter SDK, OpenJDK-17, Android tools, custom ARM64 NDK"
+        echo ""
         
         # Environment 3
-        printf " [3] %-36s : " "PostgreSQL Database Server"
-        check_postgresql_status
-        echo -e "     - Ext. size: ~35 MB Download / ~100 MB Disk Space"
-        echo -e "     - Includes: Server, data directory initialization, terminal control aliases"
+        print_profile_status "3" "PostgreSQL Database Server" "check_postgresql_status"
+        print_indented_bullet "    - Size: " "~35 MB Download / ~100 MB Disk Space"
+        print_indented_bullet "    - Includes: " "Server, data directory initialization, terminal control aliases"
+        echo ""
         
         # Environment 4
-        echo -e " [4] \e[1mInstall Complete Developer Suite\e[0m (Combine Node.js + Flutter + PostgreSQL)"
-        echo -e "     - Ext. size: ~2.0 GB Download / ~6.8 GB Disk Space"
+        print_indented_bullet "[4] " "Install Complete Developer Suite (Combine Node.js + Flutter + PostgreSQL)"
+        print_indented_bullet "    - Size: " "~2.0 GB Download / ~6.8 GB Disk Space"
         
+        draw_line "─"
         # Additional Utilities
-        echo -e " [5] Uninstall / Cleanly Remove an Environment Profile"
-        echo -e " [6] Run Detailed System Diagnostics"
-        echo -e " [7] Patch Gradle aapt2 Jar Caches (Fix building issues)"
-        echo -e " [8] Exit devenv-pocket"
+        echo -e " ${CLR_TITLE}ADDITIONAL UTILITIES:${CLR_RESET}"
+        echo ""
+        print_indented_bullet "[5] " "Uninstall / Remove an Environment Profile"
+        echo ""
+        print_indented_bullet "[6] " "Run Detailed System Diagnostics"
+        echo ""
+        print_indented_bullet "[7] " "Patch Gradle aapt2 (Fix build issues)"
+        echo ""
+        print_indented_bullet "[8] " "Exit"
         
         draw_line "─"
         echo -ne " ${CLR_MENU}Select an option (1-8):${CLR_RESET} "
