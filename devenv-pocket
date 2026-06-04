@@ -193,6 +193,20 @@ run_with_spinner() {
     # Empty log file
     : > "$DEVENVS_LOG"
     
+    # Calculate screen width for safe non-wrapping message
+    local cols
+    cols=$(tput cols 2>/dev/null || echo 70)
+    if [ -z "$cols" ] || [ "$cols" -lt 10 ]; then cols=70; fi
+    if [ "$cols" -gt 70 ]; then cols=70; fi
+    
+    # Prefix "[x] " is 4 chars. Suffix "..." is 3 chars. 
+    # Max message length must be cols - 8 to be completely safe from wrapping.
+    local max_msg_len=$((cols - 8))
+    local disp_msg="$msg"
+    if [ ${#disp_msg} -gt $max_msg_len ] && [ $max_msg_len -gt 5 ]; then
+        disp_msg="${disp_msg:0:$((max_msg_len - 3))}..."
+    fi
+    
     # Run command in background
     eval "$cmd" > "$DEVENVS_LOG" 2>&1 &
     local pid=$!
@@ -201,7 +215,7 @@ run_with_spinner() {
     
     while kill -0 $pid 2>/dev/null; do
         i=$(( (i+1) % 4 ))
-        printf "\r${CLR_MENU}[%c]${CLR_RESET} %s..." "${spin:$i:1}" "$msg"
+        printf "\r${CLR_MENU}[%c]${CLR_RESET} %s...\e[K" "${spin:$i:1}" "$disp_msg"
         sleep 0.1
     done
     
@@ -209,13 +223,13 @@ run_with_spinner() {
     local exit_code=$?
     
     if [ $exit_code -ne 0 ]; then
-        printf "\r${CLR_ERR}[✘]${CLR_RESET} %s (Failed with code %d)\n" "$msg" "$exit_code"
+        printf "\r${CLR_ERR}[✘]${CLR_RESET} %s (Failed with code %d)\e[K\n" "$disp_msg" "$exit_code"
         echo -e "${CLR_WARN}--- Installation log error output ---${CLR_RESET}"
         tail -n 15 "$DEVENVS_LOG"
         echo -e "${CLR_WARN}-------------------------------------${CLR_RESET}"
         return $exit_code
     else
-        printf "\r${CLR_VAL}[✔]${CLR_RESET} %s (Completed successfully)\n" "$msg"
+        printf "\r${CLR_VAL}[✔]${CLR_RESET} %s (Completed successfully)\e[K\n" "$disp_msg"
         return 0
     fi
 }
@@ -292,14 +306,15 @@ get_system_info() {
     local user; user=$(whoami)
     local space; space=$(get_free_space)
     
-    echo -e "┌──────────────────────────────────────────────────────────────────────┐"
-    echo -e "│ ${CLR_TITLE}SYSTEM DETAILS${CLR_RESET}                                                       │"
-    echo -e "├──────────────────────────────────────────────────────────────────────┤"
-    printf "│ %-14s : %-51s │\n" "Distribution" "$distro"
-    printf "│ %-14s : %-51s │\n" "Architecture" "$arch"
-    printf "│ %-14s : %-51s │\n" "Active User" "$user"
-    printf "│ %-14s : %-51s │\n" "Disk Available" "$space"
-    echo -e "└──────────────────────────────────────────────────────────────────────┘"
+    echo ""
+    draw_line "─"
+    echo -e " ${CLR_TITLE}SYSTEM DETAILS:${CLR_RESET}"
+    echo ""
+    printf "   %-16s : %s\n" "Distribution" "$distro"
+    printf "   %-16s : %s\n" "Architecture" "$arch"
+    printf "   %-16s : %s\n" "Active User" "$user"
+    printf "   %-16s : %s\n" "Disk Available" "$space"
+    draw_line "─"
 }
 
 # ==============================================================================
@@ -308,64 +323,69 @@ get_system_info() {
 
 select_execution_mode() {
     if [ -n "$CLI_MODE" ]; then
-        echo "$CLI_MODE"
+        CHOSEN_MODE="$CLI_MODE"
         return 0
     fi
     
-    echo -e "\n${CLR_MENU}┌──────────────────────────────────────────────────────────────────────┐${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET} ${CLR_TITLE}CHOOSE EXECUTION ENVIRONMENT MODE${CLR_RESET}                                   ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}├──────────────────────────────────────────────────────────────────────┤${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET} [1] Graphical Desktop Mode                                            ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET}     - Designed for running graphical shells inside proot-distro      ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET}     - Configures real Chromium and desktop web layout scripts         ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET}     - Recommends using 'groot-desk' setup outside in Termux           ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET}                                                                      ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET} [2] Terminal / Headless Mode                                          ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET}     - Designed for pure CLI terminal developer workflows              ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET}     - Bypasses unnecessary GUI drivers and heavy PPA dependencies    ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET}     - Exposes web-based VS Code and background local FTP editors      ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}└──────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+    echo ""
+    draw_line "─"
+    echo -e " ${CLR_TITLE}CHOOSE EXECUTION ENVIRONMENT MODE:${CLR_RESET}"
+    echo ""
+    print_indented_bullet "[1] " "Graphical Desktop Mode"
+    print_indented_bullet "    - " "Designed for running graphical app shells inside your environment"
+    print_indented_bullet "    - " "Configures Chromium web browser and desktop layout scripts"
+    print_indented_bullet "    - " "Recommends using 'groot-desk' setup outside in Termux"
+    echo ""
+    print_indented_bullet "[2] " "Terminal / Headless Mode"
+    print_indented_bullet "    - " "Designed for pure CLI terminal developer workflows"
+    print_indented_bullet "    - " "Bypasses GUI graphical drivers and heavy community repositories"
+    print_indented_bullet "    - " "Exposes web-based VS Code and background local FTP editors"
+    draw_line "─"
     echo -ne " ${CLR_MENU}Choose environment setup type (1-2, default is Terminal):${CLR_RESET} "
+    
     read -r m_choice
     
     if [ "$m_choice" = "1" ]; then
-        echo "graphical"
+        CHOSEN_MODE="graphical"
     else
-        echo "terminal"
+        CHOSEN_MODE="terminal"
     fi
 }
 
 select_terminal_editor() {
     if [ -n "$CLI_EDITOR" ]; then
-        echo "$CLI_EDITOR"
+        CHOSEN_EDITOR="$CLI_EDITOR"
         return 0
     fi
     
-    echo -e "\n${CLR_MENU}┌──────────────────────────────────────────────────────────────────────┐${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET} ${CLR_TITLE}CHOOSE DEVELOPER EDITOR ACCESSIBILITIES (HEADLESS)${CLR_RESET}                  ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}├──────────────────────────────────────────────────────────────────────┤${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET} [1] code-server (Full VS Code running in Android's web browser)       ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET}     - Recommended. Starts a VS Code instance accessed from browser.   ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET}     - Installs 'cs' shell command to launch VS Code seamlessly.       ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET}                                                                      ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET} [2] Acode via FTP Server (pyftpdlib Python library package)           ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET}     - Exposes the internal /root/projects directory safely.           ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET}     - Allows lightning-fast offline code edits within Android Acode.  ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET}                                                                      ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET} [3] Install BOTH code-server and Acode FTP Server                     ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}│${CLR_RESET} [4] None (I will use terminal nano/vim or mount paths manually)       ${CLR_MENU}│${CLR_RESET}"
-    echo -e "${CLR_MENU}└──────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
+    echo ""
+    draw_line "─"
+    echo -e " ${CLR_TITLE}CHOOSE DEVELOPER EDITOR ACCESS (HEADLESS):${CLR_RESET}"
+    echo ""
+    print_indented_bullet "[1] " "code-server (Full VS Code running in Android browser)"
+    print_indented_bullet "    - " "Starts a VS Code instance accessed from your web browser"
+    print_indented_bullet "    - " "Installs 'cs' shell command to launch VS Code easily"
+    echo ""
+    print_indented_bullet "[2] " "Acode via FTP Server"
+    print_indented_bullet "    - " "Exposes internal projects directory over secure local port"
+    print_indented_bullet "    - " "Allows lightning-fast offline code edits inside Acode app"
+    echo ""
+    print_indented_bullet "[3] " "Install BOTH code-server and Acode FTP Server"
+    echo ""
+    print_indented_bullet "[4] " "None (Use terminal nano/vim or mount paths manually)"
+    draw_line "─"
     echo -ne " ${CLR_MENU}Select coding interface helper (1-4, default is Both):${CLR_RESET} "
+    
     read -r e_choice
     
     if [ "$e_choice" = "1" ]; then
-        echo "codeserver"
+        CHOSEN_EDITOR="codeserver"
     elif [ "$e_choice" = "2" ]; then
-        echo "ftp"
+        CHOSEN_EDITOR="ftp"
     elif [ "$e_choice" = "4" ]; then
-        echo "none"
+        CHOSEN_EDITOR="none"
     else
-        echo "both"
+        CHOSEN_EDITOR="both"
     fi
 }
 
@@ -377,13 +397,53 @@ show_acode_direct_path_tip() {
     echo -e "      ${CLR_MENU}/data/data/com.termux/files/var/lib/proot-distro/installed-rootfs/ubuntu/root/projects${CLR_RESET}"
 }
 
+start_ftp_server() {
+    # Check if pyftpdlib is installed
+    if ! python3 -c "import pyftpdlib" >/dev/null 2>&1; then
+        echo -e "${CLR_INFO}[➔]${CLR_RESET} Installing python3-pyftpdlib..."
+        run_with_spinner "$SUDO apt install -y python3-pyftpdlib" "Installing python3-pyftpdlib via apt"
+        local exit_code=$?
+        if [ $exit_code -ne 0 ]; then
+            run_with_spinner "pip3 install pyftpdlib" "Installing pyftpdlib via pip3"
+        fi
+    fi
+    
+    # Check if server is already running on port 2121
+    if nc -z localhost 2121 >/dev/null 2>&1; then
+        echo -e "${CLR_VAL}[✔]${CLR_RESET} FTP Server is already running on port 2121."
+        return 0
+    fi
+    
+    echo -e "${CLR_INFO}[➔]${CLR_RESET} Starting FTP server on port 2121..."
+    mkdir -p "$PROJECTS_DIR"
+    python3 -m pyftpdlib -p 2121 -w -d "$PROJECTS_DIR" >/tmp/devenv_ftp.log 2>&1 &
+    sleep 1
+    if nc -z localhost 2121 >/dev/null 2>&1; then
+        echo -e "${CLR_VAL}[✔]${CLR_RESET} FTP Server started successfully."
+    else
+        echo -e "${CLR_ERR}[✘]${CLR_RESET} Failed to start FTP Server. Log details:"
+        tail -n 10 /tmp/devenv_ftp.log
+    fi
+}
+
+stop_ftp_server() {
+    echo -e "${CLR_INFO}[➔]${CLR_RESET} Stopping FTP server..."
+    local pids; pids=$(pgrep -f "pyftpdlib")
+    if [ -n "$pids" ]; then
+        kill $pids
+        echo -e "${CLR_VAL}[✔]${CLR_RESET} FTP Server stopped."
+    else
+        echo -e "${CLR_WARN}[!]${CLR_RESET} No running FTP Server found."
+    fi
+}
+
 # ==============================================================================
 # ENVIRONMENT 1: NODE.JS & WEB DEVELOPMENT
 # ==============================================================================
 
 check_node_web_status() {
     local missing_base=0
-    local base_pkgs=(curl git unzip xz-utils zip wget nodejs npm)
+    local base_pkgs=(curl git unzip xz-utils zip wget nodejs)
     for pkg in "${base_pkgs[@]}"; do
         if ! check_apt_pkg "$pkg"; then
             ((missing_base++))
@@ -391,7 +451,7 @@ check_node_web_status() {
     done
     
     local has_pnpm=0
-    if command -v pnpm >/dev/null 2>&1; then
+    if command -v pnpm >/dev/null 2>&1 && pnpm -v >/dev/null 2>&1; then
         has_pnpm=1
     fi
     
@@ -579,8 +639,8 @@ EOF
 }
 
 install_node_web_env() {
-    local mode
-    mode=$(select_execution_mode)
+    select_execution_mode
+    local mode="$CHOSEN_MODE"
     
     echo -e "\n${CLR_TITLE}Installing Node.js & Web Development Profile (${mode} mode)...${CLR_RESET}"
     
@@ -594,7 +654,23 @@ install_node_web_env() {
     echo -e "\n--- Step 1: Upgrading package manager & installing dependencies ---"
     run_with_spinner "$SUDO apt update" "Syncing repositories"
     
-    local base_pkgs=(curl git unzip xz-utils zip wget nodejs npm)
+    # Configure NodeSource PPA for modern Node.js v20 if node is missing or npm is broken
+    local node_broken=0
+    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || ! npm --version >/dev/null 2>&1; then
+        node_broken=1
+    fi
+
+    if [ $node_broken -eq 1 ]; then
+        echo -e "${CLR_INFO}[➔]${CLR_RESET} Node.js is missing or npm is broken. Configuring NodeSource PPA..."
+        if ! check_apt_pkg "curl"; then
+            run_with_spinner "$SUDO apt install -y curl" "Installing curl"
+        fi
+        curl -fsSL https://deb.nodesource.com/setup_20.x | $SUDO -E bash -
+        # Force installation of nodejs from NodeSource PPA
+        run_with_spinner "$SUDO apt install -y nodejs" "Installing Node.js from NodeSource PPA"
+    fi
+    
+    local base_pkgs=(curl git unzip xz-utils zip wget nodejs gnupg)
     if [ "$mode" = "graphical" ]; then
         base_pkgs+=(software-properties-common)
     fi
@@ -614,8 +690,26 @@ install_node_web_env() {
     
     # 2. Install pnpm
     echo -e "\n--- Step 2: Global Node Package Managers ---"
-    if ! command -v pnpm >/dev/null 2>&1; then
-        run_with_spinner "$SUDO npm install -g pnpm" "Installing pnpm globally via npm"
+    if ! command -v pnpm >/dev/null 2>&1 || ! pnpm -v >/dev/null 2>&1; then
+        # Remove broken installations if present
+        $SUDO rm -f /usr/bin/pnpm /usr/local/bin/pnpm "$HOME/.local/share/pnpm/pnpm" 2>/dev/null
+        # Try npm install quietly first
+        if npm install -g pnpm >/dev/null 2>&1 && pnpm -v >/dev/null 2>&1; then
+            echo -e "${CLR_VAL}[✔]${CLR_RESET} pnpm installed globally via npm."
+        else
+            # Remove npm-installed broken pnpm files if any
+            $SUDO rm -f /usr/bin/pnpm /usr/local/bin/pnpm 2>/dev/null
+            run_with_spinner "curl -fsSL https://get.pnpm.io/install.sh | SHELL=bash bash -" "Installing standalone pnpm via curl"
+            local exit_code=$?
+            if [ $exit_code -eq 0 ]; then
+                # Register in /usr/local/bin if present in local share
+                if [ -f "$HOME/.local/share/pnpm/pnpm" ]; then
+                    $SUDO ln -sf "$HOME/.local/share/pnpm/pnpm" /usr/local/bin/pnpm 2>/dev/null
+                    $SUDO chmod +x "$HOME/.local/share/pnpm/pnpm" 2>/dev/null
+                    $SUDO chmod +x /usr/local/bin/pnpm 2>/dev/null
+                fi
+            fi
+        fi
     else
         echo -e "${CLR_VAL}[✔]${CLR_RESET} pnpm already globally installed ($(pnpm -v))."
     fi
@@ -624,7 +718,20 @@ install_node_web_env() {
     if [ "$mode" = "graphical" ]; then
         echo -e "\n--- Step 3: Browser Setup (Chromium ARM64 PPA) ---"
         if ! check_apt_pkg "chromium"; then
-            run_with_spinner "$SUDO add-apt-repository -y ppa:xtradeb/apps" "Adding xtradeb/apps community PPA"
+            echo -e "${CLR_INFO}[➔]${CLR_RESET} Adding xtradeb/apps community PPA manually..."
+            local codename=""
+            if [ -f /etc/os-release ]; then
+                codename=$(grep '^VERSION_CODENAME=' /etc/os-release | cut -d= -f2 | tr -d '"')
+                if [ -z "$codename" ]; then
+                    codename=$(grep '^UBUNTU_CODENAME=' /etc/os-release | cut -d= -f2 | tr -d '"')
+                fi
+            fi
+            if [ -z "$codename" ]; then
+                codename=$(lsb_release -sc 2>/dev/null || echo "jammy")
+            fi
+            $SUDO mkdir -p /usr/share/keyrings
+            run_with_spinner "curl -fsSL \"https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x82BB6851C64F6880\" | gpg --dearmor | $SUDO tee /usr/share/keyrings/xtradeb.gpg > /dev/null" "Adding xtradeb PPA signing key"
+            echo "deb [signed-by=/usr/share/keyrings/xtradeb.gpg] https://ppa.launchpadcontent.net/xtradeb/apps/ubuntu ${codename} main" | $SUDO tee /etc/apt/sources.list.d/xtradeb-apps.list > /dev/null
             run_with_spinner "$SUDO apt update" "Updating repository list"
             run_with_spinner "$SUDO apt install -y chromium" "Installing Chromium web browser"
         else
@@ -651,7 +758,8 @@ install_node_web_env() {
     # 4. Handle Headless Code Editors Setup
     local editor="none"
     if [ "$mode" = "terminal" ]; then
-        editor=$(select_terminal_editor)
+        select_terminal_editor
+        editor="$CHOSEN_EDITOR"
     else
         editor="codeserver"
     fi
@@ -689,34 +797,21 @@ cs() {
     if [ "$editor" = "ftp" ] || [ "$editor" = "both" ]; then
         echo -e "\n--- Step 5: Configuring Python FTP Server (for Acode) ---"
         start_ftp_server
-        
-        echo -ne "\n${CLR_MENU}[?]${CLR_RESET} Run FTP server automatically on terminal session start? (y/N): "
-        read -r run_boot
-        if [[ "$run_boot" =~ ^[Yy]$ ]]; then
-            append_block_to_bashrc "FTPBOOT" "python3 -m pyftpdlib -p 2121 -w -d $PROJECTS_DIR >/tmp/devenv_ftp.log 2>&1 &"
-            echo -e "${CLR_VAL}[✔] Registered automatic FTP server start on session login.${CLR_RESET}"
-        fi
+        append_block_to_bashrc "FTPBOOT" "python3 -m pyftpdlib -p 2121 -w -d $PROJECTS_DIR >/tmp/devenv_ftp.log 2>&1 &"
+        echo -e "${CLR_VAL}[✔] Registered automatic FTP server start on session login.${CLR_RESET}"
     fi
     
     if [ "$mode" = "terminal" ]; then
         show_acode_direct_path_tip
     fi
     
-    # 5. Offer offline templates caching setup
-    local enable_offline="$CLI_OFFLINE"
-    if [ -z "$enable_offline" ]; then
-        echo -ne "\n${CLR_MENU}[?]${CLR_RESET} Configure Offline Web Caching & Starter Templates? (React/Node) (y/N): "
-        read -r enable_offline
-    fi
-    if [[ "$enable_offline" =~ ^([Yy]|true)$ ]]; then
-        configure_offline_web_templates
-    fi
+    # 5. Configure Offline Web Caching & Starter Templates automatically
+    configure_offline_web_templates
     
     # Project setup defaults
     mkdir -p "$PROJECTS_DIR"
     
     echo -e "\n${CLR_VAL}✔ Node.js & Web development profile setup complete!${CLR_RESET}"
-    echo -e "${CLR_WARN}[!] Action Needed:${CLR_RESET} Please run: ${CLR_MENU}source ~/.bashrc${CLR_RESET} to enable settings."
 }
 
 remove_node_web_env() {
@@ -814,8 +909,8 @@ configure_offline_flutter_templates() {
 }
 
 install_flutter_android_env() {
-    local mode
-    mode=$(select_execution_mode)
+    select_execution_mode
+    local mode="$CHOSEN_MODE"
     
     echo -e "\n${CLR_TITLE}Installing Flutter & Android Development Profile (${mode} mode)...${CLR_RESET}"
     echo -e "${CLR_WARN}[!] Storage Note:${CLR_RESET} Requires ~1.5 GB download / ~5.5 GB disk space."
@@ -829,7 +924,7 @@ install_flutter_android_env() {
     echo -e "\n--- Step 1: Upgrading package manager & installing dependencies ---"
     run_with_spinner "$SUDO apt update" "Syncing repositories"
     
-    local base_pkgs=(openjdk-17-jdk android-tools-adb aapt clang cmake ninja-build lld binutils curl git unzip xz-utils zip wget)
+    local base_pkgs=(openjdk-17-jdk android-tools-adb aapt clang cmake ninja-build lld binutils curl git unzip xz-utils zip wget gnupg)
     if [ "$mode" = "graphical" ]; then
         base_pkgs+=(software-properties-common)
     fi
@@ -854,7 +949,20 @@ install_flutter_android_env() {
     if [ "$mode" = "graphical" ]; then
         echo -e "\n--- Step 2: Web platform target setup (Chromium PPA) ---"
         if ! check_apt_pkg "chromium"; then
-            run_with_spinner "$SUDO add-apt-repository -y ppa:xtradeb/apps" "Adding PPA"
+            echo -e "${CLR_INFO}[➔]${CLR_RESET} Adding xtradeb/apps community PPA manually..."
+            local codename=""
+            if [ -f /etc/os-release ]; then
+                codename=$(grep '^VERSION_CODENAME=' /etc/os-release | cut -d= -f2 | tr -d '"')
+                if [ -z "$codename" ]; then
+                    codename=$(grep '^UBUNTU_CODENAME=' /etc/os-release | cut -d= -f2 | tr -d '"')
+                fi
+            fi
+            if [ -z "$codename" ]; then
+                codename=$(lsb_release -sc 2>/dev/null || echo "jammy")
+            fi
+            $SUDO mkdir -p /usr/share/keyrings
+            run_with_spinner "curl -fsSL \"https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x82BB6851C64F6880\" | gpg --dearmor | $SUDO tee /usr/share/keyrings/xtradeb.gpg > /dev/null" "Adding xtradeb PPA signing key"
+            echo "deb [signed-by=/usr/share/keyrings/xtradeb.gpg] https://ppa.launchpadcontent.net/xtradeb/apps/ubuntu ${codename} main" | $SUDO tee /etc/apt/sources.list.d/xtradeb-apps.list > /dev/null
             run_with_spinner "$SUDO apt update" "Updating packages"
             run_with_spinner "$SUDO apt install -y chromium" "Installing Chromium"
         fi
@@ -986,8 +1094,8 @@ export PATH="$PATH:$HOME/tools"'
     
     # 8. Handle Editor Configuration in Terminal mode
     if [ "$mode" = "terminal" ]; then
-        local editor
-        editor=$(select_terminal_editor)
+        select_terminal_editor
+        local editor="$CHOSEN_EDITOR"
         
         if [ "$editor" = "codeserver" ] || [ "$editor" = "both" ]; then
             echo -e "\n--- Step 9: Installing code-server (VS Code in Android browser) ---"
@@ -1021,13 +1129,8 @@ cs() {
         if [ "$editor" = "ftp" ] || [ "$editor" = "both" ]; then
             echo -e "\n--- Step 10: Configuring Python FTP Server (for Acode) ---"
             start_ftp_server
-            
-            echo -ne "\n${CLR_MENU}[?]${CLR_RESET} Run FTP server automatically on terminal session start? (y/N): "
-            read -r run_boot
-            if [[ "$run_boot" =~ ^[Yy]$ ]]; then
-                append_block_to_bashrc "FTPBOOT" "python3 -m pyftpdlib -p 2121 -w -d $PROJECTS_DIR >/tmp/devenv_ftp.log 2>&1 &"
-                echo -e "${CLR_VAL}[✔] Registered automatic FTP server start on session login.${CLR_RESET}"
-            fi
+            append_block_to_bashrc "FTPBOOT" "python3 -m pyftpdlib -p 2121 -w -d $PROJECTS_DIR >/tmp/devenv_ftp.log 2>&1 &"
+            echo -e "${CLR_VAL}[✔] Registered automatic FTP server start on session login.${CLR_RESET}"
         fi
         
         show_acode_direct_path_tip
@@ -1048,15 +1151,9 @@ cs() {
         echo -e "${CLR_INFO}└──────────────────────────────────────────────────────────────────────┘${CLR_RESET}"
     fi
     
-    # 9. Offer offline cache pre-compilation
-    local enable_offline="$CLI_OFFLINE"
-    if [ -z "$enable_offline" ]; then
-        echo -ne "\n${CLR_MENU}[?]${CLR_RESET} Pre-populate Android SDK & Gradle Caches for Offline Development? (y/N): "
-        read -r enable_offline
-    fi
-    if [[ "$enable_offline" =~ ^([Yy]|true)$ ]]; then
-        configure_offline_flutter_templates
-    fi
+    # 9. Pre-populate Caches and Patch Gradle Automatically
+    configure_offline_flutter_templates
+    patch_gradle_cache
     
     # Trigger first doctor run
     echo -e "\n--- Step 11: Testing components via 'flutter doctor' ---"
@@ -1065,7 +1162,6 @@ cs() {
     mkdir -p "$PROJECTS_DIR"
     
     echo -e "\n${CLR_VAL}✔ Flutter & Android App Suite setup complete!${CLR_RESET}"
-    echo -e "${CLR_WARN}[!] Action Needed:${CLR_RESET} Please run: ${CLR_MENU}source ~/.bashrc${CLR_RESET} to enable settings."
 }
 
 remove_flutter_android_env() {
@@ -1154,7 +1250,6 @@ alias pgdb='su -s /bin/bash postgres -c \"psql\"'"
     
     echo -e "\n${CLR_VAL}✔ PostgreSQL Database Server setup complete!${CLR_RESET}"
     echo -e "${CLR_INFO}[*] Info:${CLR_RESET} You can run ${CLR_MENU}pgdb${CLR_RESET} now to configure schemas."
-    echo -e "${CLR_WARN}[!] Action Needed:${CLR_RESET} Please run: ${CLR_MENU}source ~/.bashrc${CLR_RESET} to enable settings."
 }
 
 remove_postgresql_env() {
@@ -1465,12 +1560,10 @@ main_menu() {
         echo ""
         print_indented_bullet "[6] " "Run Detailed System Diagnostics"
         echo ""
-        print_indented_bullet "[7] " "Patch Gradle aapt2 (Fix build issues)"
-        echo ""
-        print_indented_bullet "[8] " "Exit"
+        print_indented_bullet "[7] " "Exit"
         
         draw_line "─"
-        echo -ne " ${CLR_MENU}Select an option (1-8):${CLR_RESET} "
+        echo -ne " ${CLR_MENU}Select an option (1-7):${CLR_RESET} "
         read -r choice
         
         case $choice in
@@ -1507,11 +1600,6 @@ main_menu() {
                 read -rn 1
                 ;;
             7)
-                patch_gradle_cache
-                echo -e "\nPress any key to return to menu..."
-                read -rn 1
-                ;;
-            8)
                 echo -e "\n${CLR_VAL}Exiting devenv-pocket. Happy coding!${CLR_RESET}"
                 exit 0
                 ;;
